@@ -1,0 +1,5 @@
+pandas
+slack-bolt
+python-dotenv
+jira 
+openai>=1.0.0  
