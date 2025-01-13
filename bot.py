@@ -1,6 +1,5 @@
 import os
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from jira_client import JiraAnalyzer
 import logging
@@ -33,8 +32,17 @@ jira_config = {
 
 analyzer = JiraAnalyzer(jira_config)
 
-# Initialize Slack app with token
-app = App(token=os.environ.get("SLACK_BOT_TOKEN"))
+app = Flask(__name__)
+
+
+@app.route("/", methods=["POST"])
+def slack_events():
+    data = request.json
+    if "challenge" in data:
+        return jsonify({"challenge": data["challenge"]})
+    # Handle other events here
+    return "", 200
+
 
 PORT = int(os.environ.get("PORT", 8000))
 
@@ -219,11 +227,5 @@ def handle_message_changed(event, say):
 
 
 if __name__ == "__main__":
-    try:
-        handler = SocketModeHandler(
-            app=app, app_token=os.environ.get("SLACK_APP_TOKEN"), logger=logger
-        )
-        logger.info("⚡️ CIntel is starting in Socket Mode...")
-        handler.start()
-    except Exception as e:
-        logger.error(f"Error starting app: {e}")
+    port = int(os.environ.get("PORT", 3000))
+    app.run(host="0.0.0.0", port=port)
