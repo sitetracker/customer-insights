@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from jira_client import JiraAnalyzer
 import logging
 import time
+import http.server
+import socketserver
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,20 +35,44 @@ analyzer = JiraAnalyzer(jira_config)
 # Initialize Slack app with token
 app = App(token=os.environ.get("SLACK_BOT_TOKEN"))
 
+PORT = int(os.environ.get("PORT", 8000))
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"<html><body><h1>Server is running</h1></body></html>")
+
+
+# Start the HTTP server in a separate thread
+httpd = socketserver.TCPServer(("", PORT), Handler)
+logger.info(f"Serving HTTP on port {PORT}")
+httpd.serve_forever()
+
 
 def clean_component_name(text):
     """Clean and extract component name from various input formats"""
     # Remove common prefixes and extra whitespace
     text = text.lower().strip()
-    prefixes_to_remove = ['/customer', '/insights', 'customer', 'insights', 'for', 'analyze']
-    
+    prefixes_to_remove = [
+        "/customer",
+        "/insights",
+        "customer",
+        "insights",
+        "for",
+        "analyze",
+    ]
+
     for prefix in prefixes_to_remove:
         if text.startswith(prefix):
-            text = text[len(prefix):].strip()
-    
+            text = text[len(prefix) :].strip()
+
     # Remove any leading/trailing special characters
-    text = text.strip('/:- ')
+    text = text.strip("/:- ")
     return text.strip()
+
 
 def handle_strategy_request(text, say):
     """Common handler for both mentions and messages"""
@@ -57,26 +83,30 @@ def handle_strategy_request(text, say):
 
         # Clean and extract component name by removing bot mention and extra spaces
         component = text.lower()
-        
+
         # Remove bot mention if present
-        if '<@' in component:
-            component = component.split('>', 1)[-1]
-        
+        if "<@" in component:
+            component = component.split(">", 1)[-1]
+
         # Clean up any extra spaces or special characters
-        component = component.strip('/:- \n\t')
-        
+        component = component.strip("/:- \n\t")
+
         # Get available components first
         available_components = analyzer.get_available_components()
         print(f"Available components: {available_components}")  # Debug print
-        
+
         if not component:
             if available_components:
-                say(f"Please specify a component name. Available components:\n" + 
-                    f"{', '.join(available_components)}")
+                say(
+                    f"Please specify a component name. Available components:\n"
+                    + f"{', '.join(available_components)}"
+                )
             else:
-                say("No components found in JIRA. Please check your JIRA configuration.")
+                say(
+                    "No components found in JIRA. Please check your JIRA configuration."
+                )
             return
-        
+
         # Start with JIRA fetch status
         loading_msg = say(f"📊 Fetching JIRA data for {component}...")
 
@@ -84,10 +114,10 @@ def handle_strategy_request(text, say):
         component_map = {c.lower(): c for c in available_components}
         if component.lower() not in component_map:
             app.client.chat_update(
-                channel=loading_msg['channel'],
-                ts=loading_msg['ts'],
-                text=f"❌ Component '{component}' not found.\nAvailable components:\n" +
-                     f"{', '.join(available_components)}"
+                channel=loading_msg["channel"],
+                ts=loading_msg["ts"],
+                text=f"❌ Component '{component}' not found.\nAvailable components:\n"
+                + f"{', '.join(available_components)}",
             )
             return
 
@@ -99,55 +129,52 @@ def handle_strategy_request(text, say):
             comps = analyzer.get_component_analysis("", force_refresh=True)
             if isinstance(comps, dict) and "components" in comps:
                 app.client.chat_update(
-                    channel=loading_msg['channel'],
-                    ts=loading_msg['ts'],
-                    text=f"❌ Component '{component}' not found.\nAvailable components:\n" +
-                         f"{', '.join(comps['components'])}"
+                    channel=loading_msg["channel"],
+                    ts=loading_msg["ts"],
+                    text=f"❌ Component '{component}' not found.\nAvailable components:\n"
+                    + f"{', '.join(comps['components'])}",
                 )
             return
 
         # Update status for processing
         app.client.chat_update(
-            channel=loading_msg['channel'],
-            ts=loading_msg['ts'],
-            text=f"🧠 Processing insights for {component}..."
+            channel=loading_msg["channel"],
+            ts=loading_msg["ts"],
+            text=f"🧠 Processing insights for {component}...",
         )
 
         blocks_batches = analyzer.format_slack_message(analysis)
         if blocks_batches:
             # Update status before showing results
             app.client.chat_update(
-                channel=loading_msg['channel'],
-                ts=loading_msg['ts'],
-                text=f"📝 Preparing results for {component}..."
+                channel=loading_msg["channel"],
+                ts=loading_msg["ts"],
+                text=f"📝 Preparing results for {component}...",
             )
-            
+
             # Short delay to show the preparing message
             time.sleep(1)
-            
+
             # Delete the loading message
-            app.client.chat_delete(
-                channel=loading_msg['channel'],
-                ts=loading_msg['ts']
-            )
-            
+            app.client.chat_delete(channel=loading_msg["channel"], ts=loading_msg["ts"])
+
             # Send results in batches
             for blocks in blocks_batches:
                 say(blocks=blocks)
         else:
             app.client.chat_update(
-                channel=loading_msg['channel'],
-                ts=loading_msg['ts'],
-                text=f"⚠️ No analysis available for {component}."
+                channel=loading_msg["channel"],
+                ts=loading_msg["ts"],
+                text=f"⚠️ No analysis available for {component}.",
             )
 
     except Exception as e:
         print(f"ERROR: {e}")
         try:
             app.client.chat_update(
-                channel=loading_msg['channel'],
-                ts=loading_msg['ts'],
-                text=f"❌ Error analyzing {component}: {e}"
+                channel=loading_msg["channel"],
+                ts=loading_msg["ts"],
+                text=f"❌ Error analyzing {component}: {e}",
             )
         except:
             say(f"Sorry, I encountered an error: {e}")
