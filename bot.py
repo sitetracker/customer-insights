@@ -17,10 +17,10 @@ env_path = os.path.join(current_dir, ".env")
 load_dotenv(env_path, override=True)  # Force reload
 
 # Verify environment variables
-print("Bot environment check:")
-print(f"JIRA_SERVER: {os.environ.get('JIRA_SERVER')}")
-print(f"JIRA_EMAIL: {os.environ.get('JIRA_EMAIL')}")
-print(f"JIRA_API_TOKEN length: {len(os.environ.get('JIRA_API_TOKEN', ''))}")
+logger.info("Bot environment check:")
+logger.info(f"JIRA_SERVER: {os.environ.get('JIRA_SERVER')}")
+logger.info(f"JIRA_EMAIL: {os.environ.get('JIRA_EMAIL')}")
+logger.info(f"JIRA_API_TOKEN length: {len(os.environ.get('JIRA_API_TOKEN', ''))}")
 
 # Initialize JIRA client
 jira_config = {
@@ -38,9 +38,13 @@ app = Flask(__name__)
 def slack_events():
     data = request.json
     logger.info(f"Received event: {data}")
+
     if "challenge" in data:
+        logger.info("Received challenge request")
         return jsonify({"challenge": data["challenge"]})
+
     if data.get("type") == "event_callback":
+        logger.info(f"Received event callback: {data.get('event', {})}")
         event = data.get("event", {})
         if event.get("type") == "app_mention":
             handle_mention(event)
@@ -77,6 +81,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def clean_component_name(text):
     """Clean and extract component name from various input formats"""
+    logger.info(f"Cleaning component name: {text}")
     # Remove common prefixes and extra whitespace
     text = text.lower().strip()
     prefixes_to_remove = [
@@ -94,11 +99,13 @@ def clean_component_name(text):
 
     # Remove any leading/trailing special characters
     text = text.strip("/:- ")
+    logger.info(f"Cleaned component name: {text}")
     return text.strip()
 
 
 def handle_strategy_request(text, say):
     """Common handler for both mentions and messages"""
+    logger.info(f"Handling strategy request: {text}")
     try:
         # Skip if text is empty
         if not text:
@@ -223,4 +230,5 @@ def handle_message_changed(event):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Starting Flask app on port {port}")
     app.run(host="0.0.0.0", port=port)
