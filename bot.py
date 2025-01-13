@@ -7,7 +7,7 @@ import time
 import http.server
 import json
 from slack_sdk import WebClient
-import slack_sdk.errors
+from slack_sdk.errors import SlackApiError
 from datetime import datetime, timedelta
 
 # Configure logging
@@ -43,21 +43,90 @@ slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
 user_request_times = {}
 
 
-@app.route("/", methods=["POST"])
+@app.route("/slack/events", methods=["POST"])
 def slack_events():
+    # Verify the request is coming from Slack
     data = request.json
-    logger.info(f"Received event: {data}")
-
-    if "challenge" in data:
-        logger.info("Received challenge request")
+    
+    # Handle URL verification challenge
+    if "type" in data and data["type"] == "url_verification":
         return jsonify({"challenge": data["challenge"]})
-
+    
+    # Handle events
     if data.get("type") == "event_callback":
-        logger.info(f"Received event callback: {data.get('event', {})}")
         event = data.get("event", {})
-        if event.get("type") == "app_mention":
-            handle_mention(event)
+        
+        # Handle messages
+        if event.get("type") == "message":
+            # Skip bot messages
+            if "bot_id" not in event:
+                handle_message_event(event)
+        
+        # Handle app_home_opened
+        elif event.get("type") == "app_home_opened":
+            handle_app_home_opened(event)
+            
     return "", 200
+
+def handle_message_event(event):
+    """Handle incoming message events"""
+    if "bot_id" in event or "text" not in event:
+        return
+        
+    text = event["text"].strip()
+    channel = event["channel"]
+    
+    # Handle direct messages
+    if event.get("channel_type") in ["im", "group"]:
+        # Initial greeting
+        if text.lower() in ['hi', 'hello', 'hey']:
+            slack_client.chat_postMessage(
+                channel=channel,
+                text="Hey there! 👋 I'm Customer Insights Bot. I can help you analyze customer issues and provide insights. Just tell me which component you'd like to analyze!"
+            )
+            return
+            
+        # Help command
+        if text.lower() in ['help', '?']:
+            help_text = """Here's how you can use me:
+• Just type a component name to analyze it
+• Type 'list' to see available components
+• Type 'help' to see this message again"""
+            slack_client.chat_postMessage(channel=channel, text=help_text)
+            return
+            
+        # List components
+        if text.lower() == 'list':
+            components = analyzer.get_available_components()
+            if components:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    text=f"Here are the available components:\n• " + "\n• ".join(components)
+                )
+            else:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    text="No components found. Please check the JIRA configuration."
+                )
+            return
+            
+        # Handle component analysis
+        handle_strategy_request(text, channel)
+
+def handle_app_home_opened(event):
+    """Handle app home opened events"""
+    if event.get("tab") == "messages":
+        channel = event["channel"]
+        welcome_text = """👋 Hi there! I'm Customer Insights Bot.
+
+I can help you analyze customer issues and provide insights about different components. Here's how to use me:
+
+• Just type a component name to analyze it
+• Type 'list' to see available components
+• Type 'help' to see this message again
+
+What component would you like to analyze?"""
+        slack_client.chat_postMessage(channel=channel, text=welcome_text)
 
 
 PORT = int(os.environ.get("PORT", 8000))
@@ -220,12 +289,6 @@ def handle_strategy_request(text, channel):
             slack_client.chat_postMessage(
                 channel=channel, text=f"Sorry, I encountered an error: {e}"
             )
-
-
-def handle_mention(event):
-    text = event.get("text", "")
-    channel = event.get("channel")
-    handle_strategy_request(text, channel)
 
 
 if __name__ == "__main__":
