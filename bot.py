@@ -7,6 +7,7 @@ import logging
 import time
 import http.server
 import socketserver
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +45,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(b"<html><body><h1>Server is running</h1></body></html>")
+
+    def do_POST(self):
+        content_length = int(self.headers["Content-Length"])
+        post_data = self.rfile.read(content_length)
+        data = json.loads(post_data)
+        if "challenge" in data:
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(data["challenge"].encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 
 # Start the HTTP server in a separate thread
