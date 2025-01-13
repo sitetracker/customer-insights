@@ -7,6 +7,7 @@ import time
 import http.server
 import json
 from slack_sdk import WebClient
+import slack_sdk.errors
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -131,9 +132,16 @@ def handle_strategy_request(text, channel):
                 )
             return
 
-        loading_msg = slack_client.chat_postMessage(
-            channel=channel, text=f"📊 Fetching JIRA data for {component}..."
-        )
+        try:
+            loading_msg = slack_client.chat_postMessage(
+                channel=channel, text=f"📊 Fetching JIRA data for {component}..."
+            )
+        except slack_sdk.errors.SlackApiError as e:
+            logger.error(f"Slack API error: {e.response['error']}")
+            slack_client.chat_postMessage(
+                channel=channel, text=f"❌ Error posting message: {e.response['error']}"
+            )
+            return
 
         component_map = {c.lower(): c for c in available_components}
         if component.lower() not in component_map:
