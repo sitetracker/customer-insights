@@ -6,6 +6,7 @@ import logging
 import time
 import http.server
 import json
+from slack_sdk import WebClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,6 +34,9 @@ analyzer = JiraAnalyzer(jira_config)
 
 app = Flask(__name__)
 
+# Initialize Slack client
+slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
+
 
 @app.route("/", methods=["POST"])
 def slack_events():
@@ -48,10 +52,6 @@ def slack_events():
         event = data.get("event", {})
         if event.get("type") == "app_mention":
             handle_mention(event)
-        elif event.get("type") == "message":
-            handle_message(event)
-        elif event.get("type") == "message_changed":
-            handle_message_changed(event)
     return "", 200
 
 
@@ -103,97 +103,82 @@ def clean_component_name(text):
     return text.strip()
 
 
-def handle_strategy_request(text, say):
-    """Common handler for both mentions and messages"""
+def handle_strategy_request(text, channel):
     logger.info(f"Handling strategy request: {text}")
     try:
-        # Skip if text is empty
         if not text:
             return
 
-        # Clean and extract component name by removing bot mention and extra spaces
         component = text.lower()
-
-        # Remove bot mention if present
         if "<@" in component:
             component = component.split(">", 1)[-1]
-
-        # Clean up any extra spaces or special characters
         component = component.strip("/:- \n\t")
 
-        # Get available components first
         available_components = analyzer.get_available_components()
-        print(f"Available components: {available_components}")  # Debug print
+        print(f"Available components: {available_components}")
 
         if not component:
             if available_components:
-                say(
-                    f"Please specify a component name. Available components:\n"
-                    + f"{', '.join(available_components)}"
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    text=f"Please specify a component name. Available components:\n"
+                    + f"{', '.join(available_components)}",
                 )
             else:
-                say(
-                    "No components found in JIRA. Please check your JIRA configuration."
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    text="No components found in JIRA. Please check your JIRA configuration.",
                 )
             return
 
-        # Start with JIRA fetch status
-        loading_msg = say(f"📊 Fetching JIRA data for {component}...")
+        loading_msg = slack_client.chat_postMessage(
+            channel=channel, text=f"📊 Fetching JIRA data for {component}..."
+        )
 
-        # Case-insensitive component matching
         component_map = {c.lower(): c for c in available_components}
         if component.lower() not in component_map:
-            app.client.chat_update(
-                channel=loading_msg["channel"],
+            slack_client.chat_update(
+                channel=channel,
                 ts=loading_msg["ts"],
                 text=f"❌ Component '{component}' not found.\nAvailable components:\n"
                 + f"{', '.join(available_components)}",
             )
             return
 
-        # Use the correctly cased component name
         actual_component = component_map[component.lower()]
         analysis = analyzer.get_component_analysis(actual_component, force_refresh=True)
 
         if not analysis:
             comps = analyzer.get_component_analysis("", force_refresh=True)
             if isinstance(comps, dict) and "components" in comps:
-                app.client.chat_update(
-                    channel=loading_msg["channel"],
+                slack_client.chat_update(
+                    channel=channel,
                     ts=loading_msg["ts"],
                     text=f"❌ Component '{component}' not found.\nAvailable components:\n"
                     + f"{', '.join(comps['components'])}",
                 )
             return
 
-        # Update status for processing
-        app.client.chat_update(
-            channel=loading_msg["channel"],
+        slack_client.chat_update(
+            channel=channel,
             ts=loading_msg["ts"],
             text=f"🧠 Processing insights for {component}...",
         )
 
         blocks_batches = analyzer.format_slack_message(analysis)
         if blocks_batches:
-            # Update status before showing results
-            app.client.chat_update(
-                channel=loading_msg["channel"],
+            slack_client.chat_update(
+                channel=channel,
                 ts=loading_msg["ts"],
                 text=f"📝 Preparing results for {component}...",
             )
-
-            # Short delay to show the preparing message
             time.sleep(1)
-
-            # Delete the loading message
-            app.client.chat_delete(channel=loading_msg["channel"], ts=loading_msg["ts"])
-
-            # Send results in batches
+            slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
             for blocks in blocks_batches:
-                say(blocks=blocks)
+                slack_client.chat_postMessage(channel=channel, blocks=blocks)
         else:
-            app.client.chat_update(
-                channel=loading_msg["channel"],
+            slack_client.chat_update(
+                channel=channel,
                 ts=loading_msg["ts"],
                 text=f"⚠️ No analysis available for {component}.",
             )
@@ -201,31 +186,21 @@ def handle_strategy_request(text, say):
     except Exception as e:
         print(f"ERROR: {e}")
         try:
-            app.client.chat_update(
-                channel=loading_msg["channel"],
+            slack_client.chat_update(
+                channel=channel,
                 ts=loading_msg["ts"],
                 text=f"❌ Error analyzing {component}: {e}",
             )
         except:
-            say(f"Sorry, I encountered an error: {e}")
+            slack_client.chat_postMessage(
+                channel=channel, text=f"Sorry, I encountered an error: {e}"
+            )
 
 
 def handle_mention(event):
     text = event.get("text", "")
-    logger.info(f"App mentioned with text: {text}")
-    # Add logic to handle mention
-
-
-def handle_message(event):
-    text = event.get("text", "")
-    logger.info(f"Message received: {text}")
-    # Add logic to handle message
-
-
-def handle_message_changed(event):
-    message = event.get("message", {}).get("text", "")
-    logger.info(f"Message changed: {message}")
-    # Add logic to handle message change
+    channel = event.get("channel")
+    handle_strategy_request(text, channel)
 
 
 if __name__ == "__main__":
