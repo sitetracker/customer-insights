@@ -5,7 +5,6 @@ from jira_client import JiraAnalyzer
 import logging
 import time
 import http.server
-import socketserver
 import json
 
 # Configure logging
@@ -38,9 +37,17 @@ app = Flask(__name__)
 @app.route("/", methods=["POST"])
 def slack_events():
     data = request.json
+    logger.info(f"Received event: {data}")
     if "challenge" in data:
         return jsonify({"challenge": data["challenge"]})
-    # Handle other events here
+    if data.get("type") == "event_callback":
+        event = data.get("event", {})
+        if event.get("type") == "app_mention":
+            handle_mention(event)
+        elif event.get("type") == "message":
+            handle_message(event)
+        elif event.get("type") == "message_changed":
+            handle_message_changed(event)
     return "", 200
 
 
@@ -66,12 +73,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
-
-
-# Start the HTTP server in a separate thread
-httpd = socketserver.TCPServer(("", PORT), Handler)
-logger.info(f"Serving HTTP on port {PORT}")
-httpd.serve_forever()
 
 
 def clean_component_name(text):
@@ -202,30 +203,24 @@ def handle_strategy_request(text, say):
             say(f"Sorry, I encountered an error: {e}")
 
 
-@app.event("app_mention")
-def handle_mention(event, say):
-    handle_strategy_request(event["text"], say)
+def handle_mention(event):
+    text = event.get("text", "")
+    logger.info(f"App mentioned with text: {text}")
+    # Add logic to handle mention
 
 
-@app.event("message")
-def handle_message(event, say):
-    """Handle regular channel messages"""
-    # Only process messages that are not from bots and contain text
-    if "text" in event and not event.get("bot_id"):
-        # Check if it's a direct message to the bot
-        if event.get("channel_type") == "im":
-            handle_strategy_request(event["text"], say)
+def handle_message(event):
+    text = event.get("text", "")
+    logger.info(f"Message received: {text}")
+    # Add logic to handle message
 
 
-# Add message_changed event handler for edited messages
-@app.event("message_changed")
-def handle_message_changed(event, say):
-    """Handle edited messages"""
-    if "message" in event and "text" in event["message"]:
-        if event.get("channel_type") == "im":
-            handle_strategy_request(event["message"]["text"], say)
+def handle_message_changed(event):
+    message = event.get("message", {}).get("text", "")
+    logger.info(f"Message changed: {message}")
+    # Add logic to handle message change
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
+    port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
