@@ -8,6 +8,7 @@ import http.server
 import json
 from slack_sdk import WebClient
 import slack_sdk.errors
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +38,9 @@ app = Flask(__name__)
 
 # Initialize Slack client
 slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
+
+# Dictionary to track the last request time for each user
+user_request_times = {}
 
 
 @app.route("/", methods=["POST"])
@@ -114,6 +118,19 @@ def handle_strategy_request(text, channel):
         if "<@" in component:
             component = component.split(">", 1)[-1]
         component = component.strip("/:- \n\t")
+
+        # Debounce logic: Check if a request has been made for the same component in the channel in the last minute
+        now = datetime.now()
+        key = (channel, component)
+        if key in user_request_times:
+            last_request_time = user_request_times[key]
+            if now - last_request_time < timedelta(minutes=1):
+                logger.info(
+                    f"Skipping request for channel {channel} and component {component} due to debounce."
+                )
+                return
+        # Update the last request time
+        user_request_times[key] = now
 
         available_components = analyzer.get_available_components()
         print(f"Available components: {available_components}")
