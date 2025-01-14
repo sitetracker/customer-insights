@@ -11,7 +11,14 @@ from slack_sdk.errors import SlackApiError
 from datetime import datetime, timedelta
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -45,27 +52,32 @@ user_request_times = {}
 
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
-    # Verify the request is coming from Slack
-    data = request.json
+    logger.info("Received request to /slack/events")
     
+    logger.info(f"Request headers: {dict(request.headers)}")
+    
+    data = request.json
+    logger.info(f"Received event data: {data}")
+
     # Handle URL verification challenge
     if "type" in data and data["type"] == "url_verification":
-        return jsonify({"challenge": data["challenge"]})
-    
-    # Handle events
+        logger.info(f"Handling verification challenge: {data['challenge']}")
+        response = jsonify({"challenge": data["challenge"]})
+        logger.info(f"Sending challenge response: {response.get_data()}")
+        return response
+
     if data.get("type") == "event_callback":
+        logger.info(f"Received event callback: {data.get('event', {})}")
         event = data.get("event", {})
         
-        # Handle messages
-        if event.get("type") == "message":
-            # Skip bot messages
+        # Handle both app_mention and direct messages
+        if event.get("type") == "app_mention":
+            handle_mention(event)
+        elif event.get("type") == "message" and event.get("channel_type") == "im":
+            # Avoid infinite loops by ignoring bot messages
             if "bot_id" not in event:
                 handle_message_event(event)
-        
-        # Handle app_home_opened
-        elif event.get("type") == "app_home_opened":
-            handle_app_home_opened(event)
-            
+                
     return "", 200
 
 def handle_message_event(event):
@@ -289,6 +301,19 @@ def handle_strategy_request(text, channel):
             slack_client.chat_postMessage(
                 channel=channel, text=f"Sorry, I encountered an error: {e}"
             )
+
+
+def handle_mention(event):
+    """Handle when the bot is mentioned in a channel"""
+    logger.info(f"Handling mention event: {event}")
+    
+    # Extract the text, removing the bot mention
+    text = event.get("text", "")
+    if "<@" in text:
+        text = text.split(">", 1)[-1].strip()
+    
+    channel = event.get("channel")
+    handle_strategy_request(text, channel)
 
 
 if __name__ == "__main__":
