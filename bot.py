@@ -66,12 +66,16 @@ def slack_events():
         logger.info(f"Sending challenge response: {response.get_data()}")
         return response
 
+    # Handle regular events
     if data.get("type") == "event_callback":
         logger.info(f"Received event callback: {data.get('event', {})}")
         event = data.get("event", {})
         
+        # Handle app_home_opened event
+        if event.get("type") == "app_home_opened":
+            handle_app_home_opened(event)
         # Handle both app_mention and direct messages
-        if event.get("type") == "app_mention":
+        elif event.get("type") == "app_mention":
             handle_mention(event)
         elif event.get("type") == "message" and event.get("channel_type") == "im":
             # Avoid infinite loops by ignoring bot messages
@@ -102,24 +106,8 @@ def handle_message_event(event):
         if text.lower() in ['help', '?']:
             help_text = """Here's how you can use me:
 • Just type a component name to analyze it
-• Type 'list' to see available components
 • Type 'help' to see this message again"""
             slack_client.chat_postMessage(channel=channel, text=help_text)
-            return
-            
-        # List components
-        if text.lower() == 'list':
-            components = analyzer.get_available_components()
-            if components:
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    text=f"Here are the available components:\n• " + "\n• ".join(components)
-                )
-            else:
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    text="No components found. Please check the JIRA configuration."
-                )
             return
             
         # Handle component analysis
@@ -127,18 +115,87 @@ def handle_message_event(event):
 
 def handle_app_home_opened(event):
     """Handle app home opened events"""
-    if event.get("tab") == "messages":
-        channel = event["channel"]
-        welcome_text = """👋 Hi there! I'm Customer Insights Bot.
-
-I can help you analyze customer issues and provide insights about different components. Here's how to use me:
-
-• Just type a component name to analyze it
-• Type 'list' to see available components
-• Type 'help' to see this message again
-
-What component would you like to analyze?"""
-        slack_client.chat_postMessage(channel=channel, text=welcome_text)
+    try:
+        user_id = event["user"]
+        
+        # Create the home view
+        home_view = {
+            "type": "home",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "🔍 Welcome to Customer Insights!",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "I help you analyze customer issues and provide insights about different components in your system. Get quick summaries of bugs, their impact, and proposed solutions."
+                    }
+                },
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "📚 How to Use",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*1️⃣ Direct Message*\nSend me a DM with a component name to analyze\n\n*2️⃣ Channel Mention*\nMention me in a channel with `@Customer-Insights analyze [component]`\n\n*3️⃣ Quick Commands*\n• Type `help` for assistance\n• Type `components` to see available components"
+                    }
+                },
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "✨ Features",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "• *Bug Analysis*: Get summaries of customer-reported issues\n• *Impact Assessment*: Understand how issues affect customers\n• *Solution Tracking*: View proposed fixes and test scenarios\n• *Component Insights*: Analyze specific components of your system"
+                    }
+                },
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": "🤖 Customer Insights Bot • Built with ❤️ by the Engineering Team"
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        # Publish the home view
+        slack_client.views_publish(
+            user_id=user_id,
+            view=home_view
+        )
+        
+    except Exception as e:
+        logger.error(f"Error publishing home view: {e}")
 
 
 PORT = int(os.environ.get("PORT", 8000))
@@ -195,12 +252,11 @@ def handle_strategy_request(text, channel):
         if not text:
             return
 
-        component = text.lower()
+        component = text.lower().strip()
         if "<@" in component:
-            component = component.split(">", 1)[-1]
-        component = component.strip("/:- \n\t")
+            component = component.split(">", 1)[-1].strip()
 
-        # Debounce logic: Check if a request has been made for the same component in the channel in the last minute
+        # Debounce logic
         now = datetime.now()
         key = (channel, component)
         if key in user_request_times:
@@ -210,25 +266,10 @@ def handle_strategy_request(text, channel):
                     f"Skipping request for channel {channel} and component {component} due to debounce."
                 )
                 return
-        # Update the last request time
         user_request_times[key] = now
 
         available_components = analyzer.get_available_components()
-        print(f"Available components: {available_components}")
-
-        if not component:
-            if available_components:
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    text=f"Please specify a component name. Available components:\n"
-                    + f"{', '.join(available_components)}",
-                )
-            else:
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    text="No components found in JIRA. Please check your JIRA configuration.",
-                )
-            return
+        component_map = {c.lower(): c for c in available_components}
 
         try:
             loading_msg = slack_client.chat_postMessage(
@@ -241,13 +282,11 @@ def handle_strategy_request(text, channel):
             )
             return
 
-        component_map = {c.lower(): c for c in available_components}
         if component.lower() not in component_map:
             slack_client.chat_update(
                 channel=channel,
                 ts=loading_msg["ts"],
-                text=f"❌ Component '{component}' not found.\nAvailable components:\n"
-                + f"{', '.join(available_components)}",
+                text=f"❌ Component '{component}' not found."
             )
             return
 
@@ -255,20 +294,17 @@ def handle_strategy_request(text, channel):
         analysis = analyzer.get_component_analysis(actual_component, force_refresh=True)
 
         if not analysis:
-            comps = analyzer.get_component_analysis("", force_refresh=True)
-            if isinstance(comps, dict) and "components" in comps:
-                slack_client.chat_update(
-                    channel=channel,
-                    ts=loading_msg["ts"],
-                    text=f"❌ Component '{component}' not found.\nAvailable components:\n"
-                    + f"{', '.join(comps['components'])}",
-                )
+            slack_client.chat_update(
+                channel=channel,
+                ts=loading_msg["ts"],
+                text=f"❌ No data available for component '{component}'."
+            )
             return
 
         slack_client.chat_update(
             channel=channel,
             ts=loading_msg["ts"],
-            text=f"🧠 Processing insights for {component}...",
+            text=f"🧠 Processing insights for {component}..."
         )
 
         blocks_batches = analyzer.format_slack_message(analysis)
@@ -276,7 +312,7 @@ def handle_strategy_request(text, channel):
             slack_client.chat_update(
                 channel=channel,
                 ts=loading_msg["ts"],
-                text=f"📝 Preparing results for {component}...",
+                text=f"📝 Preparing results for {component}..."
             )
             time.sleep(1)
             slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
@@ -286,16 +322,16 @@ def handle_strategy_request(text, channel):
             slack_client.chat_update(
                 channel=channel,
                 ts=loading_msg["ts"],
-                text=f"⚠️ No analysis available for {component}.",
+                text=f"⚠️ No analysis available for {component}."
             )
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        logger.error(f"Error in handle_strategy_request: {e}")
         try:
             slack_client.chat_update(
                 channel=channel,
                 ts=loading_msg["ts"],
-                text=f"❌ Error analyzing {component}: {e}",
+                text=f"❌ Error analyzing {component}: {e}"
             )
         except:
             slack_client.chat_postMessage(

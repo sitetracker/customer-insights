@@ -70,9 +70,10 @@ class JiraAnalyzer:
 
         jql = f"""
             type = Bug
-            AND created >= -180d
-            AND priority IN ("Class 1", "Class 2")
+            AND created >= -365d
+            AND priority IN ("Class 1", "Class 2","Class 3")
             AND component = "{component_name}"
+            AND status != Closed
             ORDER BY created DESC
         """
         try:
@@ -308,7 +309,7 @@ class JiraAnalyzer:
         def create_message_batch(blocks, batch_number, total_batches):
             header = [{
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"� Analysis Results (Part {batch_number}/{total_batches})"}
+                "text": {"type": "plain_text", "text": f"📊 Analysis Results (Part {batch_number}/{total_batches})"}
             }]
             if batch_number == total_batches:
                 header.append({
@@ -333,19 +334,48 @@ class JiraAnalyzer:
             ]
             
             for flow_type, flow_list in flows.items():
-                if flow_list and isinstance(flow_list, (list, set)):
-                    # Only include GPT summaries to keep messages focused
-                    if flow_type == "gpt_summary":
-                        for item in flow_list:
+                if flow_list and isinstance(flow_list, (list, set)) and flow_type == "gpt_summary":
+                    for item in flow_list:
+                        # Extract the title and Jira link
+                        title_parts = item.split("\n", 1)
+                        title = title_parts[0] if len(title_parts) > 0 else ""
+                        content_parts = title_parts[1].split("\n", 1) if len(title_parts) > 1 else ["", ""]
+                        jira_link = content_parts[0]
+                        details = content_parts[1] if len(content_parts) > 1 else ""
+                        
+                        # Create a section with title and link
+                        customer_blocks.append({
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"{title}\n{jira_link}"
+                            }
+                        })
+                        
+                        # Add details in a code block for clean formatting
+                        if details.strip():
+                            # Format the details with colored headers and code block
+                            formatted_details = (
+                                details
+                                .replace("*Impact:*", "*IMPACT*")  # Bold uppercase
+                                .replace("*Fix:*", "*FIX*")
+                                .replace("*Test:*", "*TEST*")
+                            )
+                            
                             customer_blocks.append({
                                 "type": "section",
-                                "text": {"type": "mrkdwn", "text": item}
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"```{formatted_details}```"  # Wrap in code block for clean formatting
+                                }
                             })
+                        
+                        # Add a small divider between issues
+                        customer_blocks.append({"type": "divider"})
             
             all_blocks.extend(customer_blocks)
-            all_blocks.append({"type": "divider"})
 
-        # Split into batches of 45 blocks (leaving room for headers)
+        # Split into batches of 45 blocks
         batch_size = 45
         batches = [all_blocks[i:i + batch_size] for i in range(0, len(all_blocks), batch_size)]
         
