@@ -4,6 +4,9 @@ from datetime import datetime
 import re
 import openai
 import concurrent.futures
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class JiraAnalyzer:
@@ -58,40 +61,55 @@ class JiraAnalyzer:
         self.component_cache = {}
         self.last_refresh = None
         self.CACHE_DURATION = 3600  # 1 hour in seconds
+        self.platform_filter = None  # Initialize platform filter
 
     ####
     # We're missing data in the issues, specifically the Customer field is a Date.
     # Need to figure out how to get the right data out of the Issue.
     ####
-    def process_production_issues(self, component_name=None):
-        """Fetch and process production issues using JQL"""
-        if not component_name:
-            return pd.DataFrame(columns=self.fields_to_analyze + ["key"])
-
-        jql = f"""
-            type = Bug
-            AND created >= -365d
-            AND priority IN ("Class 1", "Class 2","Class 3")
-            AND component = "{component_name}"
-            AND status != Closed
-            ORDER BY created DESC
-        """
+    def process_production_issues(self, component_name):
+        """Process production issues for a component"""
         try:
+            logger.info(f"Processing production issues for component: '{component_name}'")
+            
+            # First, verify the component exists and get its exact name
+            all_components = self.get_available_components()
+            matching_component = next((c for c in all_components if c.lower() == component_name.lower()), None)
+            
+            if matching_component:
+                logger.info(f"Found exact component match: {matching_component}")
+                component_name = matching_component
+            else:
+                logger.warning(f"No exact component match found for '{component_name}'. Available components: {all_components}")
+            
+            # Construct JQL query with less restrictions
+            jql = f"""
+                type in (Bug, "Production Issue", Defect)
+                AND component = "{component_name}"
+                ORDER BY created DESC
+            """
+            logger.info(f"Executing JQL query: {jql}")
+            
+            # Search for issues
+            issues = self.jira.search_issues(jql)
+            total_issues = len(issues) if issues else 0
+            logger.info(f"Found {total_issues} issues for component '{component_name}'")
+            
+            if total_issues > 0:
+                first_issue = issues[0]
+                logger.info("First issue details:")
+                logger.info(f"- Key: {first_issue.key}")
+                logger.info(f"- Summary: {getattr(first_issue.fields, 'summary', '')}")
+                logger.info(f"- Components: {[c.name for c in getattr(first_issue.fields, 'components', [])]}")
+                logger.info(f"- Priority: {getattr(first_issue.fields, 'priority', '')}")
+                logger.info(f"- Status: {getattr(first_issue.fields, 'status', '')}")
+                logger.info(f"- Customer field: {getattr(first_issue.fields, 'customfield_11602', None)}")
+            else:
+                logger.info("No issues found, returning empty DataFrame")
+                return pd.DataFrame()
+
+            # Initialize data list before using it
             data = []
-            start_at = 0
-            chunk_size = 50
-            
-            # Get initial batch of issues
-            issues = self.jira.search_issues(
-                jql,
-                startAt=start_at,
-                maxResults=chunk_size,
-                fields="summary,description,components,customfield_11554,customfield_11596,customfield_11602",
-            )
-            
-            # Return empty DataFrame if no issues found
-            if not issues:
-                return pd.DataFrame(columns=self.fields_to_analyze + ["key"])
 
             def summarize_issue(issue):
                 prompt = f"""
@@ -119,6 +137,22 @@ class JiraAnalyzer:
                     gpt_text = gpt_text.replace("Impact:", "\n*Impact:*")
                     gpt_text = gpt_text.replace("Fix:", "\n*Fix:*")
                     gpt_text = gpt_text.replace("Test:", "\n*Test:*")
+                    
+                    # Add priority information with appropriate emoji
+                    priority = getattr(issue.fields, 'priority', None)
+                    priority_text = ""
+                    if priority:
+                        if "Class 1" in priority.name:
+                            priority_text = "🔴 *Class 1*"
+                        elif "Class 2" in priority.name:
+                            priority_text = "🟧 *Class 2*"
+                        elif "Class 3" in priority.name:
+                            priority_text = "🟡 *Class 3*"
+                    
+                    title_link = f"*{getattr(issue.fields, 'summary', '')}*\n<{self.jira._options['server']}/browse/{issue.key}|View in Jira>"
+                    if priority_text:
+                        title_link = f"{priority_text} | {title_link}"
+                    
                     final_gpt_summary = f"{title_link}\n{gpt_text}\n"  # Added extra newline at end
                     return (
                         issue.key,
@@ -207,15 +241,17 @@ class JiraAnalyzer:
 
         return [f for f in flows if f]  # Remove empty flows
 
-    def get_component_analysis(self, component_name, force_refresh=False):
+    def get_component_analysis(self, component_name):
         """Get analysis for a specific component"""
         try:
-            print(f"Analyzing component: {component_name}")
-
+            logger.info(f"Starting analysis for component: {component_name}")
+            
             # Get all issues
+            logger.info("Fetching issues from JIRA...")
             df = self.process_production_issues(component_name)
             if df.empty:
-                return {"components": []}
+                logger.info(f"No issues found for component: {component_name}")
+                return {}
 
             # Extract all unique component names
             all_components = set()
@@ -223,62 +259,57 @@ class JiraAnalyzer:
                 if isinstance(components, list):
                     all_components.update(components)
 
-            print(f"Found components: {all_components}")
+            logger.info(f"Found components in issues: {all_components}")
 
-            # Filter for exact component match
+            # Filter for case-insensitive component match
             component_data = df[
                 df["components"].apply(
-                    lambda x: isinstance(x, list) and component_name in x
+                    lambda x: isinstance(x, list) and any(c.lower() == component_name.lower() for c in x)
                 )
             ]
-            print(
-                f"Found {len(component_data)} issues for component {component_name}",
-                flush=True,
-            )
+            logger.info(f"After filtering, found {len(component_data)} issues for component {component_name}")
 
             customer_flows = {}
-            for _, issue in component_data.iterrows():
+            for idx, issue in component_data.iterrows():
                 customer = issue.get("customer", None)
+                logger.info(f"Processing issue {idx+1}: Customer = {customer}")
+                
                 if not customer:
+                    logger.info("Skipping issue - no customer found")
                     continue
 
                 if customer not in customer_flows:
                     customer_flows[customer] = {
-                        "user_flows": set(),
-                        "technical_flows": set(),
-                        "requirements": set(),
-                        "gpt_summary": set(),
+                        "Class 1": [],
+                        "Class 2": [],
+                        "Class 3": []
                     }
 
-                # Extract flows
-                if issue.get("steps_to_reproduce"):
-                    customer_flows[customer]["user_flows"].update(
-                        self.extract_flows(issue["steps_to_reproduce"], "steps")
-                    )
+                # Extract priority from the GPT summary text which contains the priority emoji
+                gpt_summary = issue.get("gpt_summary", "")
+                logger.info(f"GPT Summary length: {len(gpt_summary)}")
+                
+                if "🔴" in gpt_summary:
+                    priority = "Class 1"
+                elif "🟧" in gpt_summary:
+                    priority = "Class 2"
+                elif "🟡" in gpt_summary:
+                    priority = "Class 3"
+                else:
+                    logger.info("Skipping issue - no valid priority emoji found")
+                    continue
 
-                if issue.get("root_cause"):
-                    customer_flows[customer]["technical_flows"].update(
-                        self.extract_flows(issue["root_cause"], "root_cause")
-                    )
+                logger.info(f"Adding {priority} issue to customer {customer}")
+                # Add the GPT summary to the appropriate priority list
+                if gpt_summary:
+                    customer_flows[customer][priority].append(gpt_summary)
 
-                if issue.get("expected_results"):
-                    customer_flows[customer]["requirements"].update(
-                        self.extract_flows(issue["expected_results"], "requirements")
-                    )
-
-                if issue.get("gpt_summary"):
-                    customer_flows[customer]["gpt_summary"].add(issue["gpt_summary"])
-
-            # Convert sets to lists for JSON serialization
-            for customer in customer_flows:
-                customer_flows[customer] = {
-                    k: list(v) for k, v in customer_flows[customer].items()
-                }
-
+            logger.info(f"Final customer flows: {list(customer_flows.keys())}")
+            logger.info(f"Total issues by customer: {[(c, sum(len(p) for p in f.values())) for c, f in customer_flows.items()]}")
             return customer_flows
 
         except Exception as e:
-            print(f"Error in get_component_analysis: {str(e)}")
+            logger.error(f"Error in get_component_analysis: {str(e)}")
             raise
 
     def get_available_components(self):
@@ -286,35 +317,37 @@ class JiraAnalyzer:
         try:
             # Get all components from JIRA
             projects = self.jira.projects()
-            print(f"Found projects: {[p.key for p in projects]}")  # Debug print
+            logger.info(f"Found projects: {[p.key for p in projects]}")  # Debug print
             
             all_components = []
             for project in projects:
                 components = self.jira.project_components(project.key)
-                print(f"Components in {project.key}: {[c.name for c in components]}")  # Debug print
+                logger.info(f"Components in {project.key}: {[c.name for c in components]}")  # Debug print
                 all_components.extend([comp.name for comp in components])
             
             if not all_components:
-                print("Warning: No components found in any project")
+                logger.info("Warning: No components found in any project")
+            else:
+                logger.info(f"All available components: {all_components}")
             
             return all_components
         except Exception as e:
-            print(f"Error getting components: {e}")
+            logger.error(f"Error getting components: {e}")
             if hasattr(e, 'response'):
-                print(f"Response status: {e.response.status_code}")
-                print(f"Response text: {e.response.text}")
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response text: {e.response.text}")
             return []
 
     def format_slack_message(self, analysis):
         def create_message_batch(blocks, batch_number, total_batches):
             header = [{
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"📊 Analysis Results (Part {batch_number}/{total_batches})"}
+                "text": {"type": "plain_text", "text": f":bar_chart: Analysis Results (Part {batch_number}/{total_batches})", "emoji": True}
             }]
             if batch_number == total_batches:
                 header.append({
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": "✅ Analysis complete!"}
+                    "text": {"type": "mrkdwn", "text": ":white_check_mark: Analysis complete!"}
                 })
             return header + blocks
 
@@ -322,20 +355,18 @@ class JiraAnalyzer:
             return []
 
         all_blocks = []
-        for customer, flows in analysis.items():
-            if not isinstance(flows, dict):
-                continue
-            
+        for customer, priorities in analysis.items():
             customer_blocks = [
                 {
                     "type": "header",
-                    "text": {"type": "plain_text", "text": f"Analysis for {customer}"}
+                    "text": {"type": "plain_text", "text": f"Analysis for {customer}", "emoji": True}
                 }
             ]
             
-            for flow_type, flow_list in flows.items():
-                if flow_list and isinstance(flow_list, (list, set)) and flow_type == "gpt_summary":
-                    for item in flow_list:
+            # Process each priority in order
+            for priority in ["Class 1", "Class 2", "Class 3"]:
+                if priorities[priority]:  # If there are issues in this priority
+                    for item in priorities[priority]:
                         # Extract the title and Jira link
                         title_parts = item.split("\n", 1)
                         title = title_parts[0] if len(title_parts) > 0 else ""
@@ -354,10 +385,9 @@ class JiraAnalyzer:
                         
                         # Add details in a code block for clean formatting
                         if details.strip():
-                            # Format the details with colored headers and code block
                             formatted_details = (
-                                details
-                                .replace("*Impact:*", "*IMPACT*")  # Bold uppercase
+                                details.strip()
+                                .replace("*Impact:*", "*IMPACT*")
                                 .replace("*Fix:*", "*FIX*")
                                 .replace("*Test:*", "*TEST*")
                             )
@@ -366,7 +396,7 @@ class JiraAnalyzer:
                                 "type": "section",
                                 "text": {
                                     "type": "mrkdwn",
-                                    "text": f"```{formatted_details}```"  # Wrap in code block for clean formatting
+                                    "text": f"```{formatted_details}```"
                                 }
                             })
                         
