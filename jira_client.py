@@ -5,6 +5,7 @@ import re
 import openai
 import concurrent.futures
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +16,19 @@ class JiraAnalyzer:
         print(f"Using email: {jira_config['email']}")
         print(f"API token length: {len(jira_config['api_token'])}")
 
+        self.max_retries = 3
+        self.timeout = 30  # 30 seconds timeout
+        
         try:
             self.jira = JIRA(
                 server=jira_config["server"],
                 basic_auth=(jira_config["email"], jira_config["api_token"]),
                 validate=True,
-                options={"verify": True, "headers": {"Accept": "application/json"}},
+                options={
+                    "verify": True, 
+                    "headers": {"Accept": "application/json"},
+                    "timeout": self.timeout
+                }
             )
 
             # Test connection
@@ -242,101 +250,113 @@ class JiraAnalyzer:
         return [f for f in flows if f]  # Remove empty flows
 
     def get_component_analysis(self, component_name):
-        """Get analysis for a specific component"""
-        try:
-            logger.info(f"Starting analysis for component: {component_name}")
-            
-            # Get all issues
-            logger.info("Fetching issues from JIRA...")
-            df = self.process_production_issues(component_name)
-            if df.empty:
-                logger.info(f"No issues found for component: {component_name}")
-                return {}
-
-            # Extract all unique component names
-            all_components = set()
-            for components in df["components"]:
-                if isinstance(components, list):
-                    all_components.update(components)
-
-            logger.info(f"Found components in issues: {all_components}")
-
-            # Filter for case-insensitive component match
-            component_data = df[
-                df["components"].apply(
-                    lambda x: isinstance(x, list) and any(c.lower() == component_name.lower() for c in x)
-                )
-            ]
-            logger.info(f"After filtering, found {len(component_data)} issues for component {component_name}")
-
-            customer_flows = {}
-            for idx, issue in component_data.iterrows():
-                customer = issue.get("customer", None)
-                logger.info(f"Processing issue {idx+1}: Customer = {customer}")
+        """Get analysis for a specific component with retries"""
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"Starting analysis for component: {component_name} (Attempt {attempt + 1}/{self.max_retries})")
                 
-                if not customer:
-                    logger.info("Skipping issue - no customer found")
-                    continue
+                # Get all issues
+                logger.info("Fetching issues from JIRA...")
+                df = self.process_production_issues(component_name)
+                if df.empty:
+                    logger.info(f"No issues found for component: {component_name}")
+                    return {}
 
-                if customer not in customer_flows:
-                    customer_flows[customer] = {
-                        "Class 1": [],
-                        "Class 2": [],
-                        "Class 3": []
-                    }
+                # Extract all unique component names
+                all_components = set()
+                for components in df["components"]:
+                    if isinstance(components, list):
+                        all_components.update(components)
 
-                # Extract priority from the GPT summary text which contains the priority emoji
-                gpt_summary = issue.get("gpt_summary", "")
-                logger.info(f"GPT Summary length: {len(gpt_summary)}")
-                
-                if "🔴" in gpt_summary:
-                    priority = "Class 1"
-                elif "🟧" in gpt_summary:
-                    priority = "Class 2"
-                elif "🟡" in gpt_summary:
-                    priority = "Class 3"
+                logger.info(f"Found components in issues: {all_components}")
+
+                # Filter for case-insensitive component match
+                component_data = df[
+                    df["components"].apply(
+                        lambda x: isinstance(x, list) and any(c.lower() == component_name.lower() for c in x)
+                    )
+                ]
+                logger.info(f"After filtering, found {len(component_data)} issues for component {component_name}")
+
+                customer_flows = {}
+                for idx, issue in component_data.iterrows():
+                    customer = issue.get("customer", None)
+                    logger.info(f"Processing issue {idx+1}: Customer = {customer}")
+                    
+                    if not customer:
+                        logger.info("Skipping issue - no customer found")
+                        continue
+
+                    if customer not in customer_flows:
+                        customer_flows[customer] = {
+                            "Class 1": [],
+                            "Class 2": [],
+                            "Class 3": []
+                        }
+
+                    # Extract priority from the GPT summary text which contains the priority emoji
+                    gpt_summary = issue.get("gpt_summary", "")
+                    logger.info(f"GPT Summary length: {len(gpt_summary)}")
+                    
+                    if "🔴" in gpt_summary:
+                        priority = "Class 1"
+                    elif "🟧" in gpt_summary:
+                        priority = "Class 2"
+                    elif "🟡" in gpt_summary:
+                        priority = "Class 3"
+                    else:
+                        logger.info("Skipping issue - no valid priority emoji found")
+                        continue
+
+                    logger.info(f"Adding {priority} issue to customer {customer}")
+                    # Add the GPT summary to the appropriate priority list
+                    if gpt_summary:
+                        customer_flows[customer][priority].append(gpt_summary)
+
+                logger.info(f"Final customer flows: {list(customer_flows.keys())}")
+                logger.info(f"Total issues by customer: {[(c, sum(len(p) for p in f.values())) for c, f in customer_flows.items()]}")
+                return customer_flows
+
+            except Exception as e:
+                logger.error(f"Error in get_component_analysis (Attempt {attempt + 1}): {str(e)}")
+                if attempt < self.max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # Exponential backoff
+                    logger.info(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
                 else:
-                    logger.info("Skipping issue - no valid priority emoji found")
-                    continue
-
-                logger.info(f"Adding {priority} issue to customer {customer}")
-                # Add the GPT summary to the appropriate priority list
-                if gpt_summary:
-                    customer_flows[customer][priority].append(gpt_summary)
-
-            logger.info(f"Final customer flows: {list(customer_flows.keys())}")
-            logger.info(f"Total issues by customer: {[(c, sum(len(p) for p in f.values())) for c, f in customer_flows.items()]}")
-            return customer_flows
-
-        except Exception as e:
-            logger.error(f"Error in get_component_analysis: {str(e)}")
-            raise
+                    logger.error("Max retries reached, giving up.")
+                    raise
 
     def get_available_components(self):
-        """Get list of all available components"""
-        try:
-            # Get all components from JIRA
-            projects = self.jira.projects()
-            logger.info(f"Found projects: {[p.key for p in projects]}")  # Debug print
-            
-            all_components = []
-            for project in projects:
-                components = self.jira.project_components(project.key)
-                logger.info(f"Components in {project.key}: {[c.name for c in components]}")  # Debug print
-                all_components.extend([comp.name for comp in components])
-            
-            if not all_components:
-                logger.info("Warning: No components found in any project")
-            else:
-                logger.info(f"All available components: {all_components}")
-            
-            return all_components
-        except Exception as e:
-            logger.error(f"Error getting components: {e}")
-            if hasattr(e, 'response'):
-                logger.error(f"Response status: {e.response.status_code}")
-                logger.error(f"Response text: {e.response.text}")
-            return []
+        """Get list of all available components with retries"""
+        for attempt in range(self.max_retries):
+            try:
+                # Get all components from JIRA
+                projects = self.jira.projects()
+                logger.info(f"Found projects: {[p.key for p in projects]}")
+                
+                all_components = []
+                for project in projects:
+                    components = self.jira.project_components(project.key)
+                    logger.info(f"Components in {project.key}: {[c.name for c in components]}")
+                    all_components.extend([comp.name for comp in components])
+                
+                if not all_components:
+                    logger.info("Warning: No components found in any project")
+                else:
+                    logger.info(f"All available components: {all_components}")
+                
+                return all_components
+
+            except Exception as e:
+                logger.error(f"Error getting components (Attempt {attempt + 1}): {str(e)}")
+                if attempt < self.max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # Exponential backoff
+                    logger.info(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error("Max retries reached, giving up.")
+                    raise
 
     def format_slack_message(self, analysis):
         def create_message_batch(blocks, batch_number, total_batches):
