@@ -5,6 +5,7 @@ slack_sdk==3.19.5
 openai==1.3.5
 pandas==1.3.3
 openpyxl==3.0.9  # For Excel support
-xlrd==2.0.1      # For older Excel formats
-google-api-python-client==2.108.0  # For Google Sheets API
-google-auth-oauthlib==1.1.0       # For Google OAuth
+Werkzeug==2.0.1  # Required by Flask
+requests==2.31.0  # Required by JIRA
+urllib3<2.0.0  # Required by requests
+certifi>=2023.7.22  # Security requirement
