@@ -9,6 +9,8 @@ import json
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from datetime import datetime, timedelta
+import openai
+from threading import Lock
 
 # Configure logging
 logging.basicConfig(
@@ -39,9 +41,34 @@ jira_config = {
     "api_token": os.environ.get("JIRA_API_TOKEN"),
 }
 
+# Initialize clients
+openai_client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 analyzer = JiraAnalyzer(jira_config)
 
+# Initialize Flask app
 app = Flask(__name__)
+
+# Add after other global variables
+response_lock = Lock()
+last_response_time = {}
+RESPONSE_COOLDOWN = 2  # seconds
+cached_components = set()
+message_tracking = {}
+processed_messages = set()
+processed_requests = set()
+
+@app.before_request
+def before_request():
+    if request.method == "POST":
+        content_type = request.headers.get("Content-Type", "")
+        if "application/json" in content_type:
+            try:
+                request.get_json()  # Force parse JSON to catch errors early
+            except Exception as e:
+                logger.error(f"Error parsing JSON: {e}")
+                return jsonify({"error": "Invalid JSON"}), 400
+    logger.info(f"Received request to {request.path}")
+    logger.info(f"Request headers: {dict(request.headers)}")
 
 # Initialize Slack client
 slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
@@ -49,40 +76,396 @@ slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
 # Dictionary to track the last request time for each user
 user_request_times = {}
 
-
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
-    logger.info("Received request to /slack/events")
-    
-    logger.info(f"Request headers: {dict(request.headers)}")
-    
-    data = request.json
-    logger.info(f"Received event data: {data}")
-
-    # Handle URL verification challenge
-    if "type" in data and data["type"] == "url_verification":
-        logger.info(f"Handling verification challenge: {data['challenge']}")
-        response = jsonify({"challenge": data["challenge"]})
-        logger.info(f"Sending challenge response: {response.get_data()}")
-        return response
-
-    # Handle regular events
-    if data.get("type") == "event_callback":
-        logger.info(f"Received event callback: {data.get('event', {})}")
-        event = data.get("event", {})
+    try:
+        content_type = request.headers.get("Content-Type", "")
         
-        # Handle app_home_opened event
-        if event.get("type") == "app_home_opened":
-            handle_app_home_opened(event)
-        # Handle both app_mention and direct messages
-        elif event.get("type") == "app_mention":
-            handle_mention(event)
-        elif event.get("type") == "message" and event.get("channel_type") == "im":
-            # Avoid infinite loops by ignoring bot messages
-            if "bot_id" not in event:
-                handle_message_event(event)
+        if "application/x-www-form-urlencoded" in content_type:
+            logger.info("Handling form data interaction")
+            payload = json.loads(request.form["payload"])
+            
+            # Generate a unique request ID using trigger_id and action_ts
+            request_id = f"{payload.get('trigger_id', '')}_{payload.get('action_ts', '')}"
+            
+            # Skip if we've seen this request before
+            if request_id in processed_requests:
+                logger.info(f"Skipping duplicate request: {request_id}")
+                return jsonify({"response_action": "clear"}), 200
+            
+            # Mark this request as processed
+            processed_requests.add(request_id)
+            
+            if "actions" in payload:
+                action = payload["actions"][0]
+                action_id = action["action_id"]
+                channel = payload["container"]["channel_id"]
+                user = payload["user"]["id"]
                 
-    return "", 200
+                # Handle component selection from buttons
+                if action_id.startswith("select_component_"):
+                    component = action_id.split("select_component_")[1]
+                    logger.info(f"Component selected: {component}")
+                    
+                    # Show analysis options for selected component
+                    blocks = [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"🎯 *Select analysis view for {component}*"
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "🎯 Key Impacts",
+                                        "emoji": True
+                                    },
+                                    "style": "primary",
+                                    "action_id": f"view_impact_{component}"
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": "🐛 Bug Insights",
+                                        "emoji": True
+                                    },
+                                    "style": "primary",
+                                    "action_id": f"view_bugs_{component}"
+                                }
+                            ]
+                        }
+                    ]
+                    
+                    # Send a single message and return immediately
+                    slack_client.chat_postEphemeral(
+                        channel=channel,
+                        user=user,
+                        blocks=blocks
+                    )
+                    return jsonify({"response_action": "clear"}), 200
+                
+                # Handle view selection
+                elif action_id.startswith("view_"):
+                    _, view_type, component = action_id.split("_", 2)
+                    logger.info(f"Processing {view_type} view for {component}")
+                    
+                    # Acknowledge button click and clear the ephemeral message
+                    response = jsonify({"response_action": "clear"})
+                    
+                    # Post loading message with specific text based on view type
+                    loading_msg = slack_client.chat_postMessage(
+                        channel=channel,
+                        text="🔍 Connecting to JIRA..."
+                    )
+                    
+                    try:
+                        if view_type == "impact":
+                            # Update loading message for JIRA query
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📊 Fetching issues from JIRA..."
+                            )
+                            
+                            # Get analysis
+                            analysis = analyzer.get_component_analysis(component)
+                            
+                            # Update loading message for processing
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="🎯 Analyzing impact patterns..."
+                            )
+                            
+                            # Process view
+                            blocks = process_view(view_type, component, analysis, channel, user)
+                            
+                            # Update loading message for final formatting
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📝 Formatting results..."
+                            )
+                        elif view_type == "bugs":
+                            # Update loading message for JIRA query
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="🐛 Fetching customer reported issues..."
+                            )
+                            
+                            # Get analysis
+                            analysis = analyzer.get_component_analysis(component)
+                            
+                            # Update loading message for processing
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="🤖 Generating bug summaries with AI..."
+                            )
+                            
+                            # Process view
+                            blocks = process_view(view_type, component, analysis, channel, user)
+                            
+                            # Update loading message for final formatting
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📝 Formatting customer bug report..."
+                            )
+                        
+                        # Delete loading message and send results
+                        slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
+                        if blocks:  # Only send if there are blocks to send
+                            slack_client.chat_postMessage(
+                                channel=channel,
+                                blocks=blocks
+                            )
+                        
+                        # Return immediately after sending results
+                        return response, 200
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing view: {e}")
+                        # Delete loading message and show error
+                        slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
+                        slack_client.chat_postMessage(
+                            channel=channel,
+                            text=f"❌ Error analyzing {view_type}: {str(e)}"
+                        )
+                        return response, 200
+                
+                # Handle download action
+                elif action_id.startswith("download_"):
+                    if action_id.startswith("download_bugs_"):
+                        component = action_id.split("download_bugs_")[1]
+                        logger.info(f"Processing bugs download for {component}")
+                        
+                        # Show initial loading message
+                        loading_msg = slack_client.chat_postMessage(
+                            channel=channel,
+                            text="🔄 Starting bugs CSV export..."
+                        )
+                        
+                        try:
+                            # Update loading message while getting analysis
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📊 Analyzing customer bugs..."
+                            )
+                            
+                            # Get analysis
+                            analysis = analyzer.get_component_analysis(component)
+                            
+                            # Update loading message while formatting CSV
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📝 Formatting bug data for export..."
+                            )
+                            
+                            # Format as CSV with specified columns
+                            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                            filename = f"customer_bugs_{component}_{timestamp}.csv"
+                            csv_content = '"Number","Component","Customer","Priority","Impact","Fix","Test"\n'
+                            
+                            row_number = 1
+                            for customer, priorities in analysis.items():
+                                for priority, flows in priorities.items():
+                                    for flow in flows:
+                                        # Extract impact, fix, and test sections
+                                        impact = ""
+                                        fix = ""
+                                        test = ""
+                                        
+                                        if "*Impact:*" in flow:
+                                            parts = flow.split("*Impact:*", 1)
+                                            impact_part = parts[1]
+                                            if "*Fix:*" in impact_part:
+                                                impact = impact_part.split("*Fix:*")[0].strip()
+                                            if "*Fix:*" in flow:
+                                                fix_part = flow.split("*Fix:*", 1)[1]
+                                                if "*Test:*" in fix_part:
+                                                    fix = fix_part.split("*Test:*")[0].strip()
+                                                    test = flow.split("*Test:*", 1)[1].strip()
+                                                else:
+                                                    fix = fix_part.strip()
+                                        
+                                        # Escape quotes in text fields
+                                        safe_impact = impact.replace('"', '""')
+                                        safe_fix = fix.replace('"', '""')
+                                        safe_test = test.replace('"', '""')
+                                        safe_customer = customer.replace('"', '""')
+                                        
+                                        # Add row to CSV
+                                        csv_content += f'{row_number},"{component}","{safe_customer}","{priority}","{safe_impact}","{safe_fix}","{safe_test}"\n'
+                                        row_number += 1
+                            
+                            # Update loading message while uploading
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📤 Uploading CSV file..."
+                            )
+                            
+                            # Upload CSV file
+                            response = slack_client.files_upload_v2(
+                                channel=channel,
+                                content=csv_content,
+                                filename=filename,
+                                title=f"Customer Bugs - {component}",
+                                initial_comment=f"📥 Here's your customer bugs CSV export for {component}"
+                            )
+                            
+                            # Delete the loading message after successful upload
+                            slack_client.chat_delete(
+                                channel=channel,
+                                ts=loading_msg["ts"]
+                            )
+                            
+                            return jsonify({"response_action": "clear"}), 200
+                            
+                        except Exception as e:
+                            logger.error(f"Error downloading bugs CSV: {e}")
+                            # Update loading message to show error
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text=f"❌ Error downloading bugs CSV: {str(e)}"
+                            )
+                            return jsonify({"response_action": "clear"}), 200
+                    
+                    else:  # Handle regular impact areas download
+                        component = action_id.split("_", 1)[1]
+                        logger.info(f"Processing download for {component}")
+                        
+                        # Show initial loading message
+                        loading_msg = slack_client.chat_postMessage(
+                            channel=channel,
+                            text="🔄 Starting CSV export process..."
+                        )
+                        
+                        try:
+                            # Update loading message while getting analysis
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📊 Analyzing component data..."
+                            )
+                            
+                            # Get analysis and extract impacts
+                            analysis = analyzer.get_component_analysis(component)
+                            impacts = []
+                            for customer, priority_flows in analysis.items():
+                                for priority, flows in priority_flows.items():
+                                    for flow in flows:
+                                        if "*Impact:*" in flow:
+                                            impact = flow.split("*Impact:*")[1]
+                                            if "*Fix:*" in impact:
+                                                impact = impact.split("*Fix:*")[0]
+                                            if "*Test:*" in impact:
+                                                impact = impact.split("*Test:*")[0]
+                                            impact = impact.strip()
+                                            if impact and impact not in impacts:
+                                                impacts.append(impact)
+                            
+                            # Update loading message while formatting CSV
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📝 Formatting data for export..."
+                            )
+                            
+                            # Format as CSV with three columns
+                            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                            filename = f"impact_areas_{component}_{timestamp}.csv"
+                            csv_content = '"Number","Component","Impact Summary"\n'  # Header with three columns
+                            for i, impact in enumerate(impacts, 1):
+                                # Quote each column separately
+                                safe_impact = impact.replace('"', '""')  # Proper CSV escaping
+                                csv_content += f'{i},"{component}","{safe_impact}"\n'
+                            
+                            # Update loading message while uploading
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text="📤 Uploading CSV file..."
+                            )
+                            
+                            # Upload CSV file
+                            response = slack_client.files_upload_v2(
+                                channel=channel,
+                                content=csv_content,
+                                filename=filename,
+                                title=f"Impact Areas - {component}",
+                                initial_comment=f"📥 Here's your CSV export for {component}"
+                            )
+                            
+                            # Delete the loading message after successful upload
+                            slack_client.chat_delete(
+                                channel=channel,
+                                ts=loading_msg["ts"]
+                            )
+                            
+                            return jsonify({"response_action": "clear"}), 200
+                            
+                        except Exception as e:
+                            logger.error(f"Error downloading CSV: {e}")
+                            # Update loading message to show error
+                            slack_client.chat_update(
+                                channel=channel,
+                                ts=loading_msg["ts"],
+                                text=f"❌ Error downloading CSV: {str(e)}"
+                            )
+                            return jsonify({"response_action": "clear"}), 200
+            
+            return jsonify({"response_action": "clear"}), 200
+            
+        else:
+            # Handle regular JSON events
+            data = request.get_json()
+            logger.info(f"Received event data: {data}")
+
+            if "type" in data and data["type"] == "url_verification":
+                return jsonify({"challenge": data["challenge"]})
+            
+            if data.get("type") == "event_callback":
+                event = data.get("event", {})
+                if event.get("type") == "app_home_opened":
+                    handle_app_home_opened(event)
+                elif event.get("type") == "app_mention":
+                    handle_mention(event)
+                elif event.get("type") == "message" and event.get("channel_type") == "im":
+                    if "bot_id" not in event:
+                        handle_message_event(event)
+                
+            return "", 200
+            
+    except Exception as e:
+        logger.error(f"Error in slack_events: {e}")
+        return jsonify({"error": str(e)}), 200
+
+def process_analysis(component, channel):
+    """Process component analysis and send results"""
+    analysis = analyzer.get_component_analysis(component)
+    if analysis:
+        blocks_batches = analyzer.format_slack_message(analysis)
+        if blocks_batches:
+            for blocks in blocks_batches:
+                slack_client.chat_postMessage(channel=channel, blocks=blocks)
+        else:
+            slack_client.chat_postMessage(
+                channel=channel,
+                text=f"⚠️ No analysis available for {component}."
+            )
 
 def handle_message_event(event):
     """Handle incoming message events"""
@@ -91,10 +474,22 @@ def handle_message_event(event):
         
     text = event["text"].strip()
     channel = event["channel"]
+    user = event.get("user")
+    ts = event.get("ts", "")
+    
+    # Generate a unique key for this message
+    message_key = f"{channel}_{user}_{ts}"
+    
+    # Skip if we've seen this message before
+    if message_key in processed_messages:
+        logger.info(f"Skipping duplicate message: {message_key}")
+        return
+    
+    # Mark this message as processed
+    processed_messages.add(message_key)
     
     # Handle direct messages
     if event.get("channel_type") in ["im", "group"]:
-        # Initial greeting
         if text.lower() in ['hi', 'hello', 'hey']:
             slack_client.chat_postMessage(
                 channel=channel,
@@ -102,16 +497,15 @@ def handle_message_event(event):
             )
             return
             
-        # Help command
         if text.lower() in ['help', '?']:
             help_text = """Here's how you can use me:
 • Just type a component name to analyze it
 • Type 'help' to see this message again"""
             slack_client.chat_postMessage(channel=channel, text=help_text)
             return
-            
-        # Handle component analysis
-        handle_strategy_request(text, channel)
+        
+        # Process the request and return immediately
+        handle_strategy_request(text, channel, user)
 
 def handle_app_home_opened(event):
     """Handle app home opened events"""
@@ -152,7 +546,7 @@ def handle_app_home_opened(event):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "*1️⃣ Direct Message*\nSend me a DM with a component name to analyze\n\n*2️⃣ Channel Mention*\nMention me in a channel with `@Customer-Insights analyze [component]`\n\n*3️⃣ Quick Commands*\n• Type `help` for assistance\n• Type `components` to see available components"
+                        "text": "*1️⃣ Direct Message (DM)*\n• Open a DM with @Customer-Insights\n• Type a component name (e.g. `Job Scheduler`)\n\n*2️⃣ Channel Mention*\n• Type `@Customer-Insights analyze [component]`\n\n*3️⃣ Quick Commands*\n• Type `help` for assistance\n• Type `components` to see available components"
                     }
                 },
                 {
@@ -172,18 +566,6 @@ def handle_app_home_opened(event):
                         "type": "mrkdwn",
                         "text": "• *Bug Analysis*: Get summaries of customer-reported issues\n• *Impact Assessment*: Understand how issues affect customers\n• *Solution Tracking*: View proposed fixes and test scenarios\n• *Component Insights*: Analyze specific components of your system"
                     }
-                },
-                {
-                    "type": "divider"
-                },
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": "🤖 Customer Insights Bot • Built with ❤️ by the Engineering Team"
-                        }
-                    ]
                 }
             ]
         }
@@ -197,148 +579,6 @@ def handle_app_home_opened(event):
     except Exception as e:
         logger.error(f"Error publishing home view: {e}")
 
-
-PORT = int(os.environ.get("PORT", 8000))
-
-
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html")
-        self.end_headers()
-        self.wfile.write(b"<html><body><h1>Server is running</h1></body></html>")
-
-    def do_POST(self):
-        content_length = int(self.headers["Content-Length"])
-        post_data = self.rfile.read(content_length)
-        data = json.loads(post_data)
-        if "challenge" in data:
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(data["challenge"].encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-
-def clean_component_name(text):
-    """Clean and extract component name from various input formats"""
-    logger.info(f"Cleaning component name: {text}")
-    # Remove common prefixes and extra whitespace
-    text = text.lower().strip()
-    prefixes_to_remove = [
-        "/customer",
-        "/insights",
-        "customer",
-        "insights",
-        "for",
-        "analyze",
-    ]
-
-    for prefix in prefixes_to_remove:
-        if text.startswith(prefix):
-            text = text[len(prefix) :].strip()
-
-    # Remove any leading/trailing special characters
-    text = text.strip("/:- ")
-    logger.info(f"Cleaned component name: {text}")
-    return text.strip()
-
-
-def handle_strategy_request(text, channel):
-    logger.info(f"Handling strategy request: {text}")
-    try:
-        if not text:
-            return
-
-        component = text.lower().strip()
-        if "<@" in component:
-            component = component.split(">", 1)[-1].strip()
-
-        # Debounce logic
-        now = datetime.now()
-        key = (channel, component)
-        if key in user_request_times:
-            last_request_time = user_request_times[key]
-            if now - last_request_time < timedelta(minutes=1):
-                logger.info(
-                    f"Skipping request for channel {channel} and component {component} due to debounce."
-                )
-                return
-        user_request_times[key] = now
-
-        available_components = analyzer.get_available_components()
-        component_map = {c.lower(): c for c in available_components}
-
-        try:
-            loading_msg = slack_client.chat_postMessage(
-                channel=channel, text=f"📊 Fetching JIRA data for {component}..."
-            )
-        except slack_sdk.errors.SlackApiError as e:
-            logger.error(f"Slack API error: {e.response['error']}")
-            slack_client.chat_postMessage(
-                channel=channel, text=f"❌ Error posting message: {e.response['error']}"
-            )
-            return
-
-        if component.lower() not in component_map:
-            slack_client.chat_update(
-                channel=channel,
-                ts=loading_msg["ts"],
-                text=f"❌ Component '{component}' not found."
-            )
-            return
-
-        actual_component = component_map[component.lower()]
-        analysis = analyzer.get_component_analysis(actual_component, force_refresh=True)
-
-        if not analysis:
-            slack_client.chat_update(
-                channel=channel,
-                ts=loading_msg["ts"],
-                text=f"❌ No data available for component '{component}'."
-            )
-            return
-
-        slack_client.chat_update(
-            channel=channel,
-            ts=loading_msg["ts"],
-            text=f"🧠 Processing insights for {component}..."
-        )
-
-        blocks_batches = analyzer.format_slack_message(analysis)
-        if blocks_batches:
-            slack_client.chat_update(
-                channel=channel,
-                ts=loading_msg["ts"],
-                text=f"📝 Preparing results for {component}..."
-            )
-            time.sleep(1)
-            slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
-            for blocks in blocks_batches:
-                slack_client.chat_postMessage(channel=channel, blocks=blocks)
-        else:
-            slack_client.chat_update(
-                channel=channel,
-                ts=loading_msg["ts"],
-                text=f"⚠️ No analysis available for {component}."
-            )
-
-    except Exception as e:
-        logger.error(f"Error in handle_strategy_request: {e}")
-        try:
-            slack_client.chat_update(
-                channel=channel,
-                ts=loading_msg["ts"],
-                text=f"❌ Error analyzing {component}: {e}"
-            )
-        except:
-            slack_client.chat_postMessage(
-                channel=channel, text=f"Sorry, I encountered an error: {e}"
-            )
-
-
 def handle_mention(event):
     """Handle when the bot is mentioned in a channel"""
     logger.info(f"Handling mention event: {event}")
@@ -349,8 +589,337 @@ def handle_mention(event):
         text = text.split(">", 1)[-1].strip()
     
     channel = event.get("channel")
-    handle_strategy_request(text, channel)
+    user = event.get("user")
+    handle_strategy_request(text, channel, user)
 
+def handle_strategy_request(text, channel, user=None):
+    """Handle component analysis requests"""
+    logger.info(f"Handling strategy request: {text}")
+    try:
+        if not text:
+            return
+
+        # Post initial loading message
+        loading_msg = slack_client.chat_postMessage(
+            channel=channel,
+            text="🤔 Let me look through our component list..."
+        )
+
+        search_term = text.lower().strip()
+        if "<@" in search_term:
+            search_term = search_term.split(">", 1)[-1].strip()
+            
+        # Update loading message while checking cache
+        slack_client.chat_update(
+            channel=channel,
+            ts=loading_msg["ts"],
+            text="🔍 Analyzing available components..."
+        )
+            
+        # Use cached components first for quick response
+        global cached_components
+        if not cached_components:
+            slack_client.chat_update(
+                channel=channel,
+                ts=loading_msg["ts"],
+                text="🔄 Refreshing component list from JIRA..."
+            )
+            cached_components = set(analyzer.get_available_components())
+        
+        # Update message while matching components
+        slack_client.chat_update(
+            channel=channel,
+            ts=loading_msg["ts"],
+            text="🎯 Finding matches for your request..."
+        )
+        
+        # Enhanced wildcard matching for components
+        matching_components = set()
+        search_words = search_term.lower().split()
+        for comp in cached_components:
+            comp_lower = comp.lower()
+            comp_words = comp_lower.split()
+            
+            # Match if:
+            # 1. Search term appears anywhere in component name
+            # 2. Component name contains any search word
+            # 3. Any word in component starts with search term
+            # 4. Search term starts with any word in component
+            if any(
+                sw in comp_lower or  # Full word match
+                comp_lower in sw or  # Component is part of search word
+                any(word.startswith(sw) or sw.startswith(word) for word in comp_words) or  # Prefix match
+                any(sw in word for word in comp_words)  # Partial word match
+                for sw in search_words
+            ):
+                matching_components.add(comp)
+        
+        matching_components = sorted(matching_components)
+        
+        # Delete the loading message
+        slack_client.chat_delete(
+            channel=channel,
+            ts=loading_msg["ts"]
+        )
+        
+        if not matching_components:
+            if user:
+                slack_client.chat_postEphemeral(
+                    channel=channel,
+                    user=user,
+                    text=f"❌ No components found matching: '{text}'"
+                )
+            else:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    text=f"❌ No components found matching: '{text}'"
+                )
+            return
+
+        # Create a single message with all matching components
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"📋 *Found {len(matching_components)} matching component{'s' if len(matching_components) > 1 else ''}:*"
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": comp,
+                            "emoji": True
+                        },
+                        "value": comp,
+                        "action_id": f"select_component_{comp}"
+                    } for comp in matching_components
+                ]
+            }
+        ]
+
+        # Send a single message and return immediately
+        if user:
+            slack_client.chat_postEphemeral(
+                channel=channel,
+                user=user,
+                blocks=blocks,
+                text="Found matching components"  # Fallback text
+            )
+        else:
+            slack_client.chat_postMessage(
+                channel=channel,
+                blocks=blocks,
+                text="Found matching components"  # Fallback text
+            )
+
+    except Exception as e:
+        logger.error(f"Error in handle_strategy_request: {e}")
+        if user:
+            slack_client.chat_postEphemeral(
+                channel=channel,
+                user=user,
+                text=f"Sorry, I encountered an error: {e}"
+            )
+        else:
+            slack_client.chat_postMessage(
+                channel=channel, 
+                text=f"Sorry, I encountered an error: {e}"
+            )
+
+def process_view(view_type, component, analysis, channel, user=None):
+    """Process different view types and return formatted blocks"""
+    logger.info(f"Processing view type: {view_type} for component: {component}")
+    
+    # Handle empty analysis case first
+    if not analysis:
+        return [{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"No {view_type} found for this component."
+            }
+        }]
+    
+    if view_type == "impact":
+        try:
+            # Extract impacts by class
+            impacts_by_class = {
+                "Class 1": [],
+                "Class 2": [],
+                "Class 3": []
+            }
+            
+            # First collect all impacts by class
+            for customer, priority_flows in analysis.items():
+                for priority, flows in priority_flows.items():
+                    for flow in flows:
+                        if "*Impact:*" in flow:
+                            impact = flow.split("*Impact:*")[1]
+                            if "*Fix:*" in impact:
+                                impact = impact.split("*Fix:*")[0]
+                            if "*Test:*" in impact:
+                                impact = impact.split("*Test:*")[0]
+                            impact = impact.strip()
+                            
+                            # Add to appropriate class based on priority
+                            if priority == "Class 1" and impact not in impacts_by_class["Class 1"]:
+                                impacts_by_class["Class 1"].append(impact)
+                            elif priority == "Class 2" and impact not in impacts_by_class["Class 2"]:
+                                impacts_by_class["Class 2"].append(impact)
+                            elif priority == "Class 3" and impact not in impacts_by_class["Class 3"]:
+                                impacts_by_class["Class 3"].append(impact)
+            
+            # Create blocks with proper structure
+            blocks = [{
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"Key Impacts for {component}",  # Updated title
+                    "emoji": True
+                }
+            }]
+            
+            # Process each class
+            for class_name, impacts in impacts_by_class.items():
+                if impacts:  # Only add section if there are impacts
+                    # Add class header
+                    blocks.append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"*{class_name} Impacts:*"
+                        }
+                    })
+                    
+                    # Format all impacts as a single string
+                    impacts_text = ""
+                    current_length = 0
+                    current_batch = []
+                    
+                    for i, impact in enumerate(impacts, 1):
+                        impact_line = f"{i}. {impact}\n"
+                        if current_length + len(impact_line) > 2800:  # Leave room for formatting
+                            # Add current batch as a block
+                            if current_batch:
+                                blocks.append({
+                                    "type": "section",
+                                    "text": {
+                                        "type": "mrkdwn",
+                                        "text": f"```{''.join(current_batch)}```"
+                                    }
+                                })
+                            current_batch = [impact_line]
+                            current_length = len(impact_line)
+                        else:
+                            current_batch.append(impact_line)
+                            current_length += len(impact_line)
+                    
+                    # Add remaining impacts if any
+                    if current_batch:
+                        blocks.append({
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"```{''.join(current_batch)}```"
+                            }
+                        })
+            
+            # Add download button if there are any impacts
+            if any(impacts_by_class.values()):
+                blocks.append({
+                    "type": "actions",
+                    "elements": [{
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "📥 Download CSV",
+                            "emoji": True
+                        },
+                        "action_id": f"download_{component}"
+                    }]
+                })
+            else:
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "No impact areas found."
+                    }
+                })
+            
+            return blocks
+
+        except Exception as e:
+            logger.error(f"Error processing impact view: {str(e)}")
+            return [{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Error analyzing impact areas: {str(e)}"
+                }
+            }]
+    
+    elif view_type == "bugs":
+        # Get all blocks for bugs view
+        blocks_batches = analyzer.format_slack_message(analysis)
+        if blocks_batches:
+            # Send all batches except the last one
+            for i, blocks in enumerate(blocks_batches[:-1]):
+                if user:
+                    slack_client.chat_postEphemeral(
+                        channel=channel,
+                        user=user,
+                        blocks=blocks,
+                        replace_original=(i == 0)
+                    )
+                else:
+                    slack_client.chat_postMessage(
+                        channel=channel,
+                        blocks=blocks
+                    )
+            
+            # Add download button to the last batch
+            last_batch = blocks_batches[-1]
+            last_batch.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "📥 Download Bugs CSV",
+                        "emoji": True
+                    },
+                    "action_id": f"download_bugs_{component}"
+                }]
+            })
+            
+            # Send the last batch with download button
+            if user:
+                slack_client.chat_postEphemeral(
+                    channel=channel,
+                    user=user,
+                    blocks=last_batch,
+                    replace_original=False
+                )
+            else:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    blocks=last_batch
+                )
+            # Return empty blocks since we've already sent the messages
+            return []
+        return [{
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "No bugs found for this component."
+            }
+        }]
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
