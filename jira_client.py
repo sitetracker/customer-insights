@@ -1,5 +1,4 @@
 from jira import JIRA
-import pandas as pd
 from datetime import datetime
 import re
 import openai
@@ -18,17 +17,17 @@ class JiraAnalyzer:
 
         self.max_retries = 3
         self.timeout = 30  # 30 seconds timeout
-        
+
         try:
             self.jira = JIRA(
                 server=jira_config["server"],
                 basic_auth=(jira_config["email"], jira_config["api_token"]),
                 validate=True,
                 options={
-                    "verify": True, 
+                    "verify": True,
                     "headers": {"Accept": "application/json"},
-                    "timeout": self.timeout
-                }
+                    "timeout": self.timeout,
+                },
             )
 
             # Test connection
@@ -41,7 +40,7 @@ class JiraAnalyzer:
             for project in projects:
                 print(f"Project: {project.key} - {project.name}")
 
-            # Get issue  
+            # Get issue
             issue_types = self.jira.issue_types()
             print("\nAvailable issue types:")
             for issue_type in issue_types:
@@ -78,18 +77,24 @@ class JiraAnalyzer:
     def process_production_issues(self, component_name):
         """Process production issues for a component"""
         try:
-            logger.info(f"Processing production issues for component: '{component_name}'")
-            
+            logger.info(
+                f"Processing production issues for component: '{component_name}'"
+            )
+
             # First, verify the component exists and get its exact name
             all_components = self.get_available_components()
-            matching_component = next((c for c in all_components if c.lower() == component_name.lower()), None)
-            
+            matching_component = next(
+                (c for c in all_components if c.lower() == component_name.lower()), None
+            )
+
             if matching_component:
                 logger.info(f"Found exact component match: {matching_component}")
                 component_name = matching_component
             else:
-                logger.warning(f"No exact component match found for '{component_name}'. Available components: {all_components}")
-            
+                logger.warning(
+                    f"No exact component match found for '{component_name}'. Available components: {all_components}"
+                )
+
             # Construct JQL query with less restrictions
             jql = f"""
                 type in (Bug, "Production Issue", Defect)
@@ -97,24 +102,30 @@ class JiraAnalyzer:
                 ORDER BY created DESC
             """
             logger.info(f"Executing JQL query: {jql}")
-            
+
             # Search for issues
             issues = self.jira.search_issues(jql)
             total_issues = len(issues) if issues else 0
             logger.info(f"Found {total_issues} issues for component '{component_name}'")
-            
+
             if total_issues > 0:
                 first_issue = issues[0]
                 logger.info("First issue details:")
                 logger.info(f"- Key: {first_issue.key}")
                 logger.info(f"- Summary: {getattr(first_issue.fields, 'summary', '')}")
-                logger.info(f"- Components: {[c.name for c in getattr(first_issue.fields, 'components', [])]}")
-                logger.info(f"- Priority: {getattr(first_issue.fields, 'priority', '')}")
+                logger.info(
+                    f"- Components: {[c.name for c in getattr(first_issue.fields, 'components', [])]}"
+                )
+                logger.info(
+                    f"- Priority: {getattr(first_issue.fields, 'priority', '')}"
+                )
                 logger.info(f"- Status: {getattr(first_issue.fields, 'status', '')}")
-                logger.info(f"- Customer field: {getattr(first_issue.fields, 'customfield_11602', None)}")
+                logger.info(
+                    f"- Customer field: {getattr(first_issue.fields, 'customfield_11602', None)}"
+                )
             else:
                 logger.info("No issues found, returning empty DataFrame")
-                return pd.DataFrame()
+                return []
 
             # Initialize data list before using it
             data = []
@@ -145,9 +156,9 @@ class JiraAnalyzer:
                     gpt_text = gpt_text.replace("Impact:", "\n*Impact:*")
                     gpt_text = gpt_text.replace("Fix:", "\n*Fix:*")
                     gpt_text = gpt_text.replace("Test:", "\n*Test:*")
-                    
+
                     # Add priority information with appropriate emoji
-                    priority = getattr(issue.fields, 'priority', None)
+                    priority = getattr(issue.fields, "priority", None)
                     priority_text = ""
                     if priority:
                         if "Class 1" in priority.name:
@@ -156,19 +167,27 @@ class JiraAnalyzer:
                             priority_text = "🟧 *Class 2*"
                         elif "Class 3" in priority.name:
                             priority_text = "🟡 *Class 3*"
-                    
+
                     title_link = f"*{getattr(issue.fields, 'summary', '')}*\n<{self.jira._options['server']}/browse/{issue.key}|View in Jira>"
                     if priority_text:
                         title_link = f"{priority_text} | {title_link}"
-                    
-                    final_gpt_summary = f"{title_link}\n{gpt_text}\n"  # Added extra newline at end
+
+                    final_gpt_summary = (
+                        f"{title_link}\n{gpt_text}\n"  # Added extra newline at end
+                    )
                     return (
                         issue.key,
                         getattr(issue.fields, "summary", ""),
-                        [c.name for c in getattr(issue.fields, "components", []) if hasattr(c, "name")],
-                        (getattr(issue.fields, "customfield_11602", None)[0].value
-                         if getattr(issue.fields, "customfield_11602", None)
-                         else None),
+                        [
+                            c.name
+                            for c in getattr(issue.fields, "components", [])
+                            if hasattr(c, "name")
+                        ],
+                        (
+                            getattr(issue.fields, "customfield_11602", None)[0].value
+                            if getattr(issue.fields, "customfield_11602", None)
+                            else None
+                        ),
                         getattr(issue.fields, "description", None),
                         final_gpt_summary,
                     )
@@ -183,9 +202,7 @@ class JiraAnalyzer:
                             if hasattr(c, "name")
                         ],
                         (
-                            getattr(issue.fields, "customfield_11602", None)[
-                                0
-                            ].value
+                            getattr(issue.fields, "customfield_11602", None)[0].value
                             if getattr(issue.fields, "customfield_11602", None)
                             else None
                         ),
@@ -195,19 +212,21 @@ class JiraAnalyzer:
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 results = list(executor.map(summarize_issue, issues))
-            
-            for key, summary, components, customer, desc, gpt_summary in results:
-                data.append({
-                    "key": key,
-                    "summary": summary,
-                    "components": components,
-                    "customer": customer,
-                    "description": desc,
-                    "gpt_summary": gpt_summary,
-                })
 
-            return pd.DataFrame(data)
-            
+            for key, summary, components, customer, desc, gpt_summary in results:
+                data.append(
+                    {
+                        "key": key,
+                        "summary": summary,
+                        "components": components,
+                        "customer": customer,
+                        "description": desc,
+                        "gpt_summary": gpt_summary,
+                    }
+                )
+
+            return data
+
         except Exception as e:
             if hasattr(e, "response"):
                 print(f"Response status: {e.response.status_code}")
@@ -253,12 +272,14 @@ class JiraAnalyzer:
         """Get analysis for a specific component with retries"""
         for attempt in range(self.max_retries):
             try:
-                logger.info(f"Starting analysis for component: {component_name} (Attempt {attempt + 1}/{self.max_retries})")
-                
+                logger.info(
+                    f"Starting analysis for component: {component_name} (Attempt {attempt + 1}/{self.max_retries})"
+                )
+
                 # Get all issues
                 logger.info("Fetching issues from JIRA...")
                 df = self.process_production_issues(component_name)
-                if df.empty:
+                if not df:
                     logger.info(f"No issues found for component: {component_name}")
                     return {}
 
@@ -271,18 +292,23 @@ class JiraAnalyzer:
                 logger.info(f"Found components in issues: {all_components}")
 
                 # Filter for case-insensitive component match
-                component_data = df[
-                    df["components"].apply(
-                        lambda x: isinstance(x, list) and any(c.lower() == component_name.lower() for c in x)
+                component_data = [
+                    issue
+                    for issue in df
+                    if isinstance(issue["components"], list)
+                    and any(
+                        c.lower() == component_name.lower() for c in issue["components"]
                     )
                 ]
-                logger.info(f"After filtering, found {len(component_data)} issues for component {component_name}")
+                logger.info(
+                    f"After filtering, found {len(component_data)} issues for component {component_name}"
+                )
 
                 customer_flows = {}
-                for idx, issue in component_data.iterrows():
+                for idx, issue in enumerate(component_data):
                     customer = issue.get("customer", None)
                     logger.info(f"Processing issue {idx+1}: Customer = {customer}")
-                    
+
                     if not customer:
                         logger.info("Skipping issue - no customer found")
                         continue
@@ -291,13 +317,13 @@ class JiraAnalyzer:
                         customer_flows[customer] = {
                             "Class 1": [],
                             "Class 2": [],
-                            "Class 3": []
+                            "Class 3": [],
                         }
 
                     # Extract priority from the GPT summary text which contains the priority emoji
                     gpt_summary = issue.get("gpt_summary", "")
                     logger.info(f"GPT Summary length: {len(gpt_summary)}")
-                    
+
                     if "🔴" in gpt_summary:
                         priority = "Class 1"
                     elif "🟧" in gpt_summary:
@@ -314,11 +340,15 @@ class JiraAnalyzer:
                         customer_flows[customer][priority].append(gpt_summary)
 
                 logger.info(f"Final customer flows: {list(customer_flows.keys())}")
-                logger.info(f"Total issues by customer: {[(c, sum(len(p) for p in f.values())) for c, f in customer_flows.items()]}")
+                logger.info(
+                    f"Total issues by customer: {[(c, sum(len(p) for p in f.values())) for c, f in customer_flows.items()]}"
+                )
                 return customer_flows
 
             except Exception as e:
-                logger.error(f"Error in get_component_analysis (Attempt {attempt + 1}): {str(e)}")
+                logger.error(
+                    f"Error in get_component_analysis (Attempt {attempt + 1}): {str(e)}"
+                )
                 if attempt < self.max_retries - 1:
                     wait_time = (attempt + 1) * 2  # Exponential backoff
                     logger.info(f"Retrying in {wait_time} seconds...")
@@ -334,22 +364,26 @@ class JiraAnalyzer:
                 # Get all components from JIRA
                 projects = self.jira.projects()
                 logger.info(f"Found projects: {[p.key for p in projects]}")
-                
+
                 all_components = []
                 for project in projects:
                     components = self.jira.project_components(project.key)
-                    logger.info(f"Components in {project.key}: {[c.name for c in components]}")
+                    logger.info(
+                        f"Components in {project.key}: {[c.name for c in components]}"
+                    )
                     all_components.extend([comp.name for comp in components])
-                
+
                 if not all_components:
                     logger.info("Warning: No components found in any project")
                 else:
                     logger.info(f"All available components: {all_components}")
-                
+
                 return all_components
 
             except Exception as e:
-                logger.error(f"Error getting components (Attempt {attempt + 1}): {str(e)}")
+                logger.error(
+                    f"Error getting components (Attempt {attempt + 1}): {str(e)}"
+                )
                 if attempt < self.max_retries - 1:
                     wait_time = (attempt + 1) * 2  # Exponential backoff
                     logger.info(f"Retrying in {wait_time} seconds...")
@@ -360,15 +394,26 @@ class JiraAnalyzer:
 
     def format_slack_message(self, analysis):
         def create_message_batch(blocks, batch_number, total_batches):
-            header = [{
-                "type": "header",
-                "text": {"type": "plain_text", "text": f":bar_chart: Analysis Results (Part {batch_number}/{total_batches})", "emoji": True}
-            }]
+            header = [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f":bar_chart: Analysis Results (Part {batch_number}/{total_batches})",
+                        "emoji": True,
+                    },
+                }
+            ]
             if batch_number == total_batches:
-                header.append({
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": ":white_check_mark: Analysis complete!"}
-                })
+                header.append(
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":white_check_mark: Analysis complete!",
+                        },
+                    }
+                )
             return header + blocks
 
         if not analysis or not isinstance(analysis, dict):
@@ -379,10 +424,14 @@ class JiraAnalyzer:
             customer_blocks = [
                 {
                     "type": "header",
-                    "text": {"type": "plain_text", "text": f"Analysis for {customer}", "emoji": True}
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"Analysis for {customer}",
+                        "emoji": True,
+                    },
                 }
             ]
-            
+
             # Process each priority in order
             for priority in ["Class 1", "Class 2", "Class 3"]:
                 if priorities[priority]:  # If there are issues in this priority
@@ -390,19 +439,25 @@ class JiraAnalyzer:
                         # Extract the title and Jira link
                         title_parts = item.split("\n", 1)
                         title = title_parts[0] if len(title_parts) > 0 else ""
-                        content_parts = title_parts[1].split("\n", 1) if len(title_parts) > 1 else ["", ""]
+                        content_parts = (
+                            title_parts[1].split("\n", 1)
+                            if len(title_parts) > 1
+                            else ["", ""]
+                        )
                         jira_link = content_parts[0]
                         details = content_parts[1] if len(content_parts) > 1 else ""
-                        
+
                         # Create a section with title and link
-                        customer_blocks.append({
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": f"{title}\n{jira_link}"
+                        customer_blocks.append(
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"{title}\n{jira_link}",
+                                },
                             }
-                        })
-                        
+                        )
+
                         # Add details in a code block for clean formatting
                         if details.strip():
                             formatted_details = (
@@ -411,23 +466,30 @@ class JiraAnalyzer:
                                 .replace("*Fix:*", "*FIX*")
                                 .replace("*Test:*", "*TEST*")
                             )
-                            
-                            customer_blocks.append({
-                                "type": "section",
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": f"```{formatted_details}```"
+
+                            customer_blocks.append(
+                                {
+                                    "type": "section",
+                                    "text": {
+                                        "type": "mrkdwn",
+                                        "text": f"```{formatted_details}```",
+                                    },
                                 }
-                            })
-                        
+                            )
+
                         # Add a small divider between issues
                         customer_blocks.append({"type": "divider"})
-            
+
             all_blocks.extend(customer_blocks)
 
         # Split into batches of 45 blocks
         batch_size = 45
-        batches = [all_blocks[i:i + batch_size] for i in range(0, len(all_blocks), batch_size)]
-        
-        return [create_message_batch(batch, i+1, len(batches)) 
-                for i, batch in enumerate(batches)]
+        batches = [
+            all_blocks[i : i + batch_size]
+            for i in range(0, len(all_blocks), batch_size)
+        ]
+
+        return [
+            create_message_batch(batch, i + 1, len(batches))
+            for i, batch in enumerate(batches)
+        ]
