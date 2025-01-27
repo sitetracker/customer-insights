@@ -9,3 +9,11 @@ Werkzeug==2.0.1  # Required by Flask
 requests==2.31.0  # Required by JIRA
 urllib3<2.0.0  # Required by requests
 certifi>=2023.7.22  # Security requirement
+
+
+# pandas
+# slack_sdk
+# python-dotenv
+# jira 
+# openai>=1.0.0  
+# Flask
