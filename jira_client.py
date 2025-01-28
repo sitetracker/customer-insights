@@ -172,6 +172,16 @@ class JiraAnalyzer:
                     final_gpt_summary = (
                         f"{title_link}\n{gpt_text}\n"  # Added extra newline at end
                     )
+                    
+                    # Safely handle customer field which could be a list or single value
+                    customer_field = getattr(issue.fields, "customfield_11602", None)
+                    customer_value = None
+                    if customer_field:
+                        if isinstance(customer_field, list) and len(customer_field) > 0:
+                            customer_value = customer_field[0].value
+                        elif hasattr(customer_field, 'value'):
+                            customer_value = customer_field.value
+                        
                     return (
                         issue.key,
                         getattr(issue.fields, "summary", ""),
@@ -180,16 +190,22 @@ class JiraAnalyzer:
                             for c in getattr(issue.fields, "components", [])
                             if hasattr(c, "name")
                         ],
-                        (
-                            getattr(issue.fields, "customfield_11602", None)[0].value
-                            if getattr(issue.fields, "customfield_11602", None)
-                            else None
-                        ),
+                        customer_value,
                         getattr(issue.fields, "description", None),
                         final_gpt_summary,
                     )
                 except:
                     final_gpt_summary = f"{title_link}\n"
+                    
+                    # Safely handle customer field which could be a list or single value
+                    customer_field = getattr(issue.fields, "customfield_11602", None)
+                    customer_value = None
+                    if customer_field:
+                        if isinstance(customer_field, list) and len(customer_field) > 0:
+                            customer_value = customer_field[0].value
+                        elif hasattr(customer_field, 'value'):
+                            customer_value = customer_field.value
+                            
                     return (
                         issue.key,
                         getattr(issue.fields, "summary", ""),
@@ -198,11 +214,7 @@ class JiraAnalyzer:
                             for c in getattr(issue.fields, "components", [])
                             if hasattr(c, "name")
                         ],
-                        (
-                            getattr(issue.fields, "customfield_11602", None)[0].value
-                            if getattr(issue.fields, "customfield_11602", None)
-                            else None
-                        ),
+                        customer_value,
                         getattr(issue.fields, "description", None),
                         final_gpt_summary,
                     )
@@ -275,26 +287,26 @@ class JiraAnalyzer:
 
                 # Get all issues
                 logger.info("Fetching issues from JIRA...")
-                df = self.process_production_issues(component_name)
-                if not df:
+                issues_data = self.process_production_issues(component_name)
+                if not issues_data:
                     logger.info(f"No issues found for component: {component_name}")
                     return {}
 
                 # Extract all unique component names
                 all_components = set()
-                for components in df["components"]:
-                    if isinstance(components, list):
-                        all_components.update(components)
+                for issue in issues_data:
+                    if isinstance(issue.get('components'), list):
+                        all_components.update(issue['components'])
 
                 logger.info(f"Found components in issues: {all_components}")
 
                 # Filter for case-insensitive component match
                 component_data = [
                     issue
-                    for issue in df
-                    if isinstance(issue["components"], list)
+                    for issue in issues_data
+                    if isinstance(issue.get('components'), list)
                     and any(
-                        c.lower() == component_name.lower() for c in issue["components"]
+                        c.lower() == component_name.lower() for c in issue['components']
                     )
                 ]
                 logger.info(
