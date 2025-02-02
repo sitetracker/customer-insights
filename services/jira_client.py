@@ -11,9 +11,6 @@ logger = logging.getLogger(__name__)
 
 class JiraAnalyzer:
     def __init__(self, jira_config):
-        print(f"Connecting to Jira server: {jira_config['server']}")
-        print(f"Using email: {jira_config['email']}")
-        print(f"API token length: {len(jira_config['api_token'])}")
 
         self.max_retries = 3
         self.timeout = 30  # 30 seconds timeout
