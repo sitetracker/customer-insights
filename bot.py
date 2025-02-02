@@ -1,16 +1,13 @@
 import os
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from jira_client import JiraAnalyzer
+from services.jira_client import JiraAnalyzer
 import logging
-import time
-import http.server
 import json
 from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
-from datetime import datetime, timedelta
 import openai
-from threading import Lock
+from threading import Lock, Thread
+import requests
 from helpers.downloader import download_bugs, download_impact_areas
 from messaging.slack_chatter import SlackChatter
 
@@ -75,135 +72,8 @@ def slack_events():
     try:
         content_type = request.headers.get("Content-Type", "")
 
-        if "application/x-www-form-urlencoded" in content_type:
-            payload = json.loads(request.form["payload"])
-
-            # Generate a unique request ID using trigger_id and action_ts
-            request_id = (
-                f"{payload.get('trigger_id', '')}_{payload.get('action_ts', '')}"
-            )
-
-            # Skip if we've seen this request before
-            if request_id in processed_requests:
-                return jsonify({"response_action": "clear"}), 200
-
-            # Mark this request as processed
-            processed_requests.add(request_id)
-
-            if "actions" in payload:
-                action = payload["actions"][0]
-                action_id = action["action_id"]
-                channel = payload["container"]["channel_id"]
-                user = payload["user"]["id"]
-                
-                slack_chatter = SlackChatter(slack_client, channel)
-
-                # Handle component selection from buttons
-                if action_id.startswith("select_component_"):
-                    component = action_id.split("select_component_")[1]
-
-                    # Show analysis options for selected component
-                    blocks = get_analysis_options_blocks(component)
-
-                    # Send a single message and return immediately
-                    slack_client.chat_postEphemeral(
-                        channel=channel, user=user, blocks=blocks
-                    )
-                    return jsonify({"response_action": "clear"}), 200
-
-                # Handle view selection
-                elif action_id.startswith("view_"):
-                    _, view_type, component = action_id.split("_", 2)
-
-                    # Acknowledge button click and clear the ephemeral message
-                    response = jsonify({"response_action": "clear"})
-
-                    # Post loading message with specific text based on view type
-                    loading_msg = slack_client.chat_postMessage(
-                        channel=channel, text="🔍 Connecting to JIRA..."
-                    )
-
-                    try:
-                        if view_type == "impact":
-                            # Update loading message for JIRA query
-                            slack_chatter.emit_message(
-                                "📊 Fetching issues from JIRA..."
-                            )
-
-                            # Get analysis
-                            analysis = analyzer.get_component_analysis(component)
-
-                            # Update loading message for processing
-                            slack_chatter.emit_message(
-                                "🎯 Analyzing impact patterns..."
-                            )
-
-                            # Process view
-                            blocks = create_view_blocks(
-                                view_type, component, analysis, channel, user
-                            )
-
-                            # Update loading message for final formatting
-                            slack_chatter.emit_message("📝 Formatting results...")
-                        elif view_type == "bugs":
-                            # Update loading message for JIRA query
-                            slack_chatter.emit_message(
-                                "🐛 Fetching customer reported issues..."
-                            )
-
-                            # Get analysis
-                            analysis = analyzer.get_component_analysis(component)
-
-                            # Update loading message for processing
-                            slack_chatter.emit_message(
-                                "🤖 Generating bug summaries with AI..."
-                            )
-
-                            # Process view
-                            blocks = create_view_blocks(
-                                view_type, component, analysis, channel, user
-                            )
-
-                            # Update loading message for final formatting
-                            slack_chatter.emit_message(
-                                "📝 Formatting customer bug report..."
-                            )
-
-                        # Delete loading message and send results
-                        slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
-                        if blocks:  # Only send if there are blocks to send
-                            slack_client.chat_postMessage(
-                                channel=channel, blocks=blocks
-                            )
-
-                        # Return immediately after sending results
-                        return response, 200
-
-                    except Exception as e:
-                        logger.error(f"Error processing view: {e}")
-                        # Delete loading message and show error
-                        slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
-                        slack_client.chat_postMessage(
-                            channel=channel,
-                            text=f"❌ Error analyzing {view_type}: {str(e)}",
-                        )
-                        return response, 200
-
-                # Handle download action
-                elif action_id.startswith("download_"):
-                    if action_id.startswith("download_bugs_"):
-                        component = action_id.split("download_bugs_")[1]
-                        return download_bugs(slack_client, analyzer, component, channel)
-
-                    else:  # Handle regular impact areas download
-                        component = action_id.split("_", 1)[1]
-                        return download_impact_areas(
-                            slack_client, analyzer, component, channel
-                        )
-
-            return jsonify({"response_action": "clear"}), 200
-
-        else:
+        is_button_click_communication = "application/x-www-form-urlencoded" in content_type
+        if not is_button_click_communication:
             # Handle regular JSON events
             data = request.get_json()
 
@@ -223,6 +93,160 @@ def slack_events():
                         handle_message_event(event)
 
             return "", 200
+
+        if is_button_click_communication:
+            payload = json.loads(request.form["payload"])
+
+            # Generate a unique request ID using trigger_id and action_ts
+            request_id = (
+                f"{payload.get('trigger_id', '')}_{payload.get('action_ts', '')}"
+            )
+
+            # Skip if we've seen this request before
+            if request_id in processed_requests:
+                return jsonify({"response_action": "clear"}), 200
+
+            # Mark this request as processed
+            processed_requests.add(request_id)
+
+            if "actions" in payload:
+                action = payload["actions"][0]
+                action_id = action["action_id"]
+                channel = payload["container"]["channel_id"]
+                user = payload["user"]["id"]
+
+                # Create a single SlackChatter instance for this request
+                slack_chatter = SlackChatter(slack_client, channel)
+
+                # Handle component selection from buttons
+                if action_id.startswith("select_component_"):
+                    component = action_id.split("select_component_")[1]
+                    response_url = payload["response_url"]
+
+                    def process_component_selection(response_url):
+                        try:
+                            # Send results directly to response_url
+                            requests.post(
+                                response_url,
+                                json={
+                                    "blocks": get_analysis_options_blocks(component),
+                                    "replace_original": True,
+                                    "response_type": "ephemeral",
+                                },
+                            )
+                        except Exception as e:
+                            logger.error(f"Error processing component selection: {e}")
+                            requests.post(
+                                response_url,
+                                json={
+                                    "text": f"❌ Error loading options: {str(e)}",
+                                    "replace_original": True,
+                                    "response_type": "ephemeral",
+                                },
+                            )
+
+                    Thread(
+                        target=process_component_selection,
+                        args=(response_url,),
+                    ).start()
+                    return jsonify({"response_action": "clear"}), 200
+
+                # Handle view selection
+                elif action_id.startswith("view_"):
+                    _, view_type, component = action_id.split("_", 2)
+                    response_url = payload["response_url"]
+
+                    def process_view_selection(response_url, chatter):
+                        try:
+                            # Send initial loading message
+                            requests.post(
+                                response_url,
+                                json={
+                                    "text": "🔄 Starting analysis...",
+                                    "replace_original": True,
+                                    "response_type": "ephemeral",
+                                },
+                            )
+
+                            if view_type == "impact":
+                                chatter.emit_message("📊 Fetching issues from JIRA...")
+                                analysis = analyzer.get_component_analysis(component)
+
+                                chatter.emit_message("🎯 Analyzing impact patterns...")
+                                blocks = create_view_blocks(
+                                    view_type, component, analysis, channel, user
+                                )
+
+                                chatter.emit_message("📝 Formatting results...")
+
+                            elif view_type == "bugs":
+                                chatter.emit_message(
+                                    "🐛 Fetching customer reported issues..."
+                                )
+                                analysis = analyzer.get_component_analysis(component)
+
+                                chatter.emit_message(
+                                    "🤖 Generating bug summaries with AI..."
+                                )
+                                blocks = create_view_blocks(
+                                    view_type, component, analysis, channel, user
+                                )
+
+                                chatter.emit_message(
+                                    "📝 Formatting customer bug report..."
+                                )
+
+                            # Send final results through response_url
+                            if blocks:
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "blocks": blocks,
+                                        "text": f"Analysis results for {component}:",
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
+                            else:
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "text": f"No {view_type} data found for {component}",
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
+
+                        except Exception as e:
+                            logger.error(f"Error processing view: {e}")
+                            requests.post(
+                                response_url,
+                                json={
+                                    "text": f"❌ Error analyzing {view_type}: {str(e)}",
+                                    "replace_original": True,
+                                    "response_type": "ephemeral",
+                                },
+                            )
+
+                    Thread(
+                        target=process_view_selection,
+                        args=(response_url, slack_chatter),
+                    ).start()
+                    return jsonify({"response_action": "clear"}), 200
+
+                # Handle download action
+                elif action_id.startswith("download_"):
+                    if action_id.startswith("download_bugs_"):
+                        component = action_id.split("download_bugs_")[1]
+                        return download_bugs(slack_client, analyzer, component, channel)
+
+                    else:  # Handle regular impact areas download
+                        component = action_id.split("_", 1)[1]
+                        return download_impact_areas(
+                            slack_client, analyzer, component, channel
+                        )
+
+            return jsonify({"response_action": "clear"}), 200
 
     except Exception as e:
         logger.error(f"Error in slack_events: {e}")
