@@ -72,7 +72,9 @@ def slack_events():
     try:
         content_type = request.headers.get("Content-Type", "")
 
-        is_button_click_communication = "application/x-www-form-urlencoded" in content_type
+        is_button_click_communication = (
+            "application/x-www-form-urlencoded" in content_type
+        )
         if not is_button_click_communication:
             # Handle regular JSON events
             data = request.get_json()
@@ -236,15 +238,98 @@ def slack_events():
 
                 # Handle download action
                 elif action_id.startswith("download_"):
+                    response_url = payload["response_url"]
                     if action_id.startswith("download_bugs_"):
                         component = action_id.split("download_bugs_")[1]
-                        return download_bugs(slack_client, analyzer, component, channel)
 
-                    else:  # Handle regular impact areas download
+                        def process_download(response_url, component, channel):
+                            try:
+                                result = download_bugs(
+                                    slack_client, analyzer, component, channel
+                                )
+                                if (
+                                    result
+                                    and result.get("ok")
+                                    and result.get("file", {}).get("permalink", "")
+                                ):
+                                    link = result["file"]["permalink"]
+                                    text = (
+                                        "📥 Your customer bugs CSV export is ready: "
+                                        + link
+                                    )
+                                else:
+                                    text = "⚠️ CSV export completed but no file link was returned."
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "text": text,
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "Error processing download bugs: " + str(e)
+                                )
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "text": "❌ Error downloading CSV: " + str(e),
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
+
+                        Thread(
+                            target=process_download,
+                            args=(response_url, component, channel),
+                        ).start()
+                    else:
                         component = action_id.split("_", 1)[1]
-                        return download_impact_areas(
-                            slack_client, analyzer, component, channel
-                        )
+
+                        def process_download(response_url, component, channel):
+                            try:
+                                result = download_impact_areas(
+                                    slack_client, analyzer, component, channel
+                                )
+                                if (
+                                    result
+                                    and result.get("ok")
+                                    and result.get("file", {}).get("permalink", "")
+                                ):
+                                    link = result["file"]["permalink"]
+                                    text = (
+                                        "📥 Your impact areas CSV export is ready: "
+                                        + link
+                                    )
+                                else:
+                                    text = "⚠️ CSV export completed but no file link was returned."
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "text": text,
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "Error processing download impact areas: " + str(e)
+                                )
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "text": "❌ Error downloading CSV: " + str(e),
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
+
+                        Thread(
+                            target=process_download,
+                            args=(response_url, component, channel),
+                        ).start()
+                    return jsonify({"response_action": "clear"}), 200
 
             return jsonify({"response_action": "clear"}), 200
 

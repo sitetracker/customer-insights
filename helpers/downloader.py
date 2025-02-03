@@ -1,5 +1,14 @@
 from datetime import datetime
 from flask import jsonify
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
 
 def download_bugs(slack_client, analyzer, component, channel):
@@ -57,7 +66,7 @@ def download_bugs(slack_client, analyzer, component, channel):
             initial_comment=f"📥 Here's your customer bugs CSV export for {component}",
         )
         slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
-        return jsonify({"response_action": "clear"}), 200
+        return response
     except Exception as e:
         logger.error(f"Error downloading bugs CSV: {e}")
         slack_client.chat_update(
@@ -65,7 +74,7 @@ def download_bugs(slack_client, analyzer, component, channel):
             ts=loading_msg["ts"],
             text=f"❌ Error downloading bugs CSV: {str(e)}",
         )
-        return jsonify({"response_action": "clear"}), 200
+        return
 
 
 def download_impact_areas(slack_client, analyzer, component, channel):
@@ -116,7 +125,7 @@ def download_impact_areas(slack_client, analyzer, component, channel):
             initial_comment=f"📥 Here's your CSV export for {component}",
         )
         slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
-        return jsonify({"response_action": "clear"}), 200
+        return response
     except Exception as e:
         logger.error(f"Error downloading CSV: {e}")
         slack_client.chat_update(
@@ -124,4 +133,4 @@ def download_impact_areas(slack_client, analyzer, component, channel):
             ts=loading_msg["ts"],
             text=f"❌ Error downloading CSV: {str(e)}",
         )
-        return jsonify({"response_action": "clear"}), 200
+        return
