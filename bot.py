@@ -118,7 +118,9 @@ def slack_events():
                 user = payload["user"]["id"]
 
                 # Create a single SlackChatter instance for this request
-                slack_chatter = SlackChatter(slack_client, channel)
+                slack_chatter = SlackChatter(
+                    slack_client, channel, response_url=payload.get("response_url")
+                )
 
                 # Handle component selection from buttons
                 if action_id.startswith("select_component_"):
@@ -171,15 +173,38 @@ def slack_events():
                             )
 
                             if view_type == "impact":
-                                chatter.emit_message("📊 Fetching issues from JIRA...")
+                                status_msg = requests.post(
+                                    response_url,
+                                    json={
+                                        "text": "📊 Fetching issues from JIRA...",
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                ).json()
+
                                 analysis = analyzer.get_component_analysis(component)
 
-                                chatter.emit_message("🎯 Analyzing impact patterns...")
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "text": "🎯 Analyzing impact patterns...",
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
+
                                 blocks = create_view_blocks(
                                     view_type, component, analysis, channel, user
                                 )
 
-                                chatter.emit_message("📝 Formatting results...")
+                                requests.post(
+                                    response_url,
+                                    json={
+                                        "text": "📝 Formatting results...",
+                                        "replace_original": True,
+                                        "response_type": "ephemeral",
+                                    },
+                                )
 
                             elif view_type == "bugs":
                                 chatter.emit_message(
