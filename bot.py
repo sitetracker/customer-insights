@@ -257,28 +257,8 @@ def slack_events():
 
                         def process_download(response_url, component, channel):
                             try:
-                                result = download_bugs(
+                                download_bugs(
                                     slack_client, analyzer, component, channel
-                                )
-                                if (
-                                    result
-                                    and result.get("ok")
-                                    and result.get("file", {}).get("permalink", "")
-                                ):
-                                    link = result["file"]["permalink"]
-                                    text = (
-                                        "📥 Your customer bugs CSV export is ready: "
-                                        + link
-                                    )
-                                else:
-                                    text = "⚠️ CSV export completed but no file link was returned."
-                                requests.post(
-                                    response_url,
-                                    json={
-                                        "text": text,
-                                        "replace_original": True,
-                                        "response_type": "ephemeral",
-                                    },
                                 )
                             except Exception as e:
                                 requests.post(
@@ -299,28 +279,8 @@ def slack_events():
 
                         def process_download(response_url, component, channel):
                             try:
-                                result = download_impact_areas(
+                                download_impact_areas(
                                     slack_client, analyzer, component, channel
-                                )
-                                if (
-                                    result
-                                    and result.get("ok")
-                                    and result.get("file", {}).get("permalink", "")
-                                ):
-                                    link = result["file"]["permalink"]
-                                    text = (
-                                        "📥 Your impact areas CSV export is ready: "
-                                        + link
-                                    )
-                                else:
-                                    text = "⚠️ CSV export completed but no file link was returned."
-                                requests.post(
-                                    response_url,
-                                    json={
-                                        "text": text,
-                                        "replace_original": True,
-                                        "response_type": "ephemeral",
-                                    },
                                 )
                             except Exception as e:
                                 requests.post(
