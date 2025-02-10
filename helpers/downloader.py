@@ -62,23 +62,12 @@ def download_bugs(slack_client, analyzer, component, channel):
             f"Uploading CSV file: filename: {filename}, CSV content length: {len(csv_content)}"
         )
         response = slack_client.files_upload_v2(
-            channel=channel,
             content=csv_content,
             filename=filename,
             title=f"Customer Bugs - {component}",
             initial_comment=f"📥 Here's your customer bugs CSV export for {component}",
             channel_id=channel,
         )
-        logger.debug(f"Slack file upload response: {response}")
-        if response.get("ok"):
-            file_id = response["file"]["id"]
-            shared_response = slack_client.files_sharedPublicURL(file=file_id)
-            logger.debug(f"Slack shared public URL response: {shared_response}")
-            response["file"]["public_url"] = shared_response.get("file", {}).get(
-                "permalink_public", ""
-            )
-            files_info_response = slack_client.files_info(file=file_id)
-            logger.info(f"Slack file info response: {files_info_response}")
         slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
         return response
     except Exception as e:
@@ -140,13 +129,6 @@ def download_impact_areas(slack_client, analyzer, component, channel):
             initial_comment=f"📥 Here's your impact areas CSV export for {component}",
             channel_id=channel,
         )
-        logger.info("Full Slack upload response structure:")
-        logger.info(f"Response status: {response.get('ok')}")
-        logger.info(f"Complete response: {response}")
-        if response.get("ok"):
-            file_id = response["file"]["id"]
-            files_info_response = slack_client.files_info(file=file_id)
-            logger.info(f"Slack file info response: {files_info_response}")
         slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
         return response
     except Exception as e:
