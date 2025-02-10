@@ -67,6 +67,7 @@ def download_bugs(slack_client, analyzer, component, channel):
             filename=filename,
             title=f"Customer Bugs - {component}",
             initial_comment=f"📥 Here's your customer bugs CSV export for {component}",
+            channel_id=channel,
         )
         logger.debug(f"Slack file upload response: {response}")
         if response.get("ok"):
@@ -76,6 +77,8 @@ def download_bugs(slack_client, analyzer, component, channel):
             response["file"]["public_url"] = shared_response.get("file", {}).get(
                 "permalink_public", ""
             )
+            files_info_response = slack_client.files_info(file=file_id)
+            logger.info(f"Slack file info response: {files_info_response}")
         slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
         return response
     except Exception as e:
@@ -98,20 +101,20 @@ def download_impact_areas(slack_client, analyzer, component, channel):
             ts=loading_msg["ts"],
             text="📊 Analyzing component data...",
         )
-        # analysis = analyzer.get_component_analysis(component)
-        # impacts = []
-        # for customer, priority_flows in analysis.items():
-        #     for priority, flows in priority_flows.items():
-        #         for flow in flows:
-        #             if "*Impact:*" in flow:
-        #                 impact = flow.split("*Impact:*", 1)[1]
-        #                 if "*Fix:*" in impact:
-        #                     impact = impact.split("*Fix:*")[0]
-        #                 if "*Test:*" in impact:
-        #                     impact = impact.split("*Test:*")[0]
-        #                 impact = impact.strip()
-        #                 if impact and impact not in impacts:
-        #                     impacts.append(impact)
+        analysis = analyzer.get_component_analysis(component)
+        impacts = []
+        for customer, priority_flows in analysis.items():
+            for priority, flows in priority_flows.items():
+                for flow in flows:
+                    if "*Impact:*" in flow:
+                        impact = flow.split("*Impact:*", 1)[1]
+                        if "*Fix:*" in impact:
+                            impact = impact.split("*Fix:*")[0]
+                        if "*Test:*" in impact:
+                            impact = impact.split("*Test:*")[0]
+                        impact = impact.strip()
+                        if impact and impact not in impacts:
+                            impacts.append(impact)
         slack_client.chat_update(
             channel=channel,
             ts=loading_msg["ts"],
@@ -119,22 +122,33 @@ def download_impact_areas(slack_client, analyzer, component, channel):
         )
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = f"impact_areas_{component}_{timestamp}.csv"
-        csv_content = f'"Number","Component","Impact Summary"\n'
-        for i in range(1, 11):
-            csv_content += f'{i},"{component}","Test impact summary line {i}"\n'
+        csv_content = '"Impact Area"\n'
+        for impact in impacts:
+            safe_impact = impact.replace('"', '""')
+            csv_content += f'"{safe_impact}"\n'
 
         slack_client.chat_update(
-            channel=channel, ts=loading_msg["ts"], text="📤 Sharing CSV content..."
+            channel=channel, ts=loading_msg["ts"], text="📤 Uploading CSV file..."
         )
         logger.info(
             f"Uploading CSV file: filename: {filename}, CSV content length: {len(csv_content)}"
         )
-        response = slack_client.chat_postMessage(
-            channel=channel,
-            text=f"📥 Here's your CSV export for {component}:\n```{csv_content}```",
+        response = slack_client.files_upload_v2(
+            content=csv_content,
+            filename=filename,
+            title=f"Impact Areas - {component}",
+            initial_comment=f"📥 Here's your impact areas CSV export for {component}",
+            channel_id=channel,
         )
-        logger.info(f"Slack message post response: {response}")
-
+        logger.info("Full Slack upload response structure:")
+        logger.info(f"Response status: {response.get('ok')}")
+        logger.info(f"Complete response: {response}")
+        if response.get("ok"):
+            file_id = response["file"]["id"]
+            files_info_response = slack_client.files_info(file=file_id)
+            logger.info(f"Slack file info response: {files_info_response}")
+        slack_client.chat_delete(channel=channel, ts=loading_msg["ts"])
+        return response
     except Exception as e:
         logger.error(f"Error downloading CSV: {e}")
         slack_client.chat_update(
