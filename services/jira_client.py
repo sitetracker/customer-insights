@@ -73,10 +73,6 @@ class JiraAnalyzer:
     def process_production_issues(self, component_name):
         """Process production issues for a component"""
         try:
-            logger.info(
-                f"Processing production issues for component: '{component_name}'"
-            )
-
             # First, verify the component exists and get its exact name
             all_components = self.get_available_components()
             matching_component = next(
@@ -84,12 +80,7 @@ class JiraAnalyzer:
             )
 
             if matching_component:
-                logger.info(f"Found exact component match: {matching_component}")
                 component_name = matching_component
-            else:
-                logger.warning(
-                    f"No exact component match found for '{component_name}'. Available components: {all_components}"
-                )
 
             # Construct JQL query with less restrictions
             jql = f"""
@@ -97,28 +88,13 @@ class JiraAnalyzer:
                 AND component = "{component_name}"
                 ORDER BY created DESC
             """
-            logger.info(f"Executing JQL query: {jql}")
             # Search for issues
             issues = self.jira.search_issues(jql)
             total_issues = len(issues) if issues else 0
-            logger.info(f"Found {total_issues} issues for component '{component_name}'")
             if total_issues > 0:
                 first_issue = issues[0]
-                logger.info("First issue details:")
-                logger.info(f"- Key: {first_issue.key}")
-                logger.info(f"- Summary: {getattr(first_issue.fields, 'summary', '')}")
-                logger.info(
-                    f"- Components: {[c.name for c in getattr(first_issue.fields, 'components', [])]}"
-                )
-                logger.info(
-                    f"- Priority: {getattr(first_issue.fields, 'priority', '')}"
-                )
-                logger.info(f"- Status: {getattr(first_issue.fields, 'status', '')}")
-                logger.info(
-                    f"- Customer field: {getattr(first_issue.fields, 'customfield_11602', None)}"
-                )
+
             else:
-                logger.info("No issues found, returning empty DataFrame")
                 return []
 
             # Initialize data list before using it
@@ -278,15 +254,9 @@ class JiraAnalyzer:
         """Get analysis for a specific component with retries"""
         for attempt in range(self.max_retries):
             try:
-                logger.info(
-                    f"Starting analysis for component: {component_name} (Attempt {attempt + 1}/{self.max_retries})"
-                )
-
                 # Get all issues
-                logger.info("Fetching issues from JIRA...")
                 issues_data = self.process_production_issues(component_name)
                 if not issues_data:
-                    logger.info(f"No issues found for component: {component_name}")
                     return {}
 
                 # Extract all unique component names
@@ -294,8 +264,6 @@ class JiraAnalyzer:
                 for issue in issues_data:
                     if isinstance(issue.get('components'), list):
                         all_components.update(issue['components'])
-
-                logger.info(f"Found components in issues: {all_components}")
 
                 # Filter for case-insensitive component match
                 component_data = [
@@ -306,17 +274,12 @@ class JiraAnalyzer:
                         c.lower() == component_name.lower() for c in issue['components']
                     )
                 ]
-                logger.info(
-                    f"After filtering, found {len(component_data)} issues for component {component_name}"
-                )
 
                 customer_flows = {}
                 for idx, issue in enumerate(component_data):
                     customer = issue.get("customer", None)
-                    logger.info(f"Processing issue {idx+1}: Customer = {customer}")
 
                     if not customer:
-                        logger.info("Skipping issue - no customer found")
                         continue
 
                     if customer not in customer_flows:
@@ -328,7 +291,6 @@ class JiraAnalyzer:
 
                     # Extract priority from the GPT summary text which contains the priority emoji
                     gpt_summary = issue.get("gpt_summary", "")
-                    logger.info(f"GPT Summary length: {len(gpt_summary)}")
 
                     if "🔴" in gpt_summary:
                         priority = "Class 1"
@@ -337,30 +299,19 @@ class JiraAnalyzer:
                     elif "🟡" in gpt_summary:
                         priority = "Class 3"
                     else:
-                        logger.info("Skipping issue - no valid priority emoji found")
                         continue
 
-                    logger.info(f"Adding {priority} issue to customer {customer}")
                     # Add the GPT summary to the appropriate priority list
                     if gpt_summary:
                         customer_flows[customer][priority].append(gpt_summary)
 
-                logger.info(f"Final customer flows: {list(customer_flows.keys())}")
-                logger.info(
-                    f"Total issues by customer: {[(c, sum(len(p) for p in f.values())) for c, f in customer_flows.items()]}"
-                )
                 return customer_flows
 
             except Exception as e:
-                logger.error(
-                    f"Error in get_component_analysis (Attempt {attempt + 1}): {str(e)}"
-                )
                 if attempt < self.max_retries - 1:
                     wait_time = (attempt + 1) * 2  # Exponential backoff
-                    logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    logger.error("Max retries reached, giving up.")
                     raise
 
     def get_available_components(self):
@@ -369,33 +320,19 @@ class JiraAnalyzer:
             try:
                 # Get all components from JIRA
                 projects = self.jira.projects()
-                logger.info(f"Found projects: {[p.key for p in projects]}")
 
                 all_components = []
                 for project in projects:
                     components = self.jira.project_components(project.key)
-                    logger.info(
-                        f"Components in {project.key}: {[c.name for c in components]}"
-                    )
                     all_components.extend([comp.name for comp in components])
-
-                if not all_components:
-                    logger.info("Warning: No components found in any project")
-                else:
-                    logger.info(f"All available components: {all_components}")
 
                 return all_components
 
             except Exception as e:
-                logger.error(
-                    f"Error getting components (Attempt {attempt + 1}): {str(e)}"
-                )
                 if attempt < self.max_retries - 1:
                     wait_time = (attempt + 1) * 2  # Exponential backoff
-                    logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    logger.error("Max retries reached, giving up.")
                     raise
 
     def format_slack_message(self, analysis):

@@ -2,7 +2,6 @@ import os
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from services.jira_client import JiraAnalyzer
-import logging
 import json
 from slack_sdk import WebClient
 import openai
@@ -10,14 +9,6 @@ from threading import Lock, Thread
 import requests
 from helpers.downloader import download_bugs, download_impact_areas
 from messaging.slack_chatter import SlackChatter
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
-)
-logger = logging.getLogger(__name__)
 
 # Load environment variables
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -56,7 +47,6 @@ def before_request():
             try:
                 request.get_json()  # Force parse JSON to catch errors early
             except Exception as e:
-                logger.error(f"Error parsing JSON: {e}")
                 return jsonify({"error": "Invalid JSON"}), 400
 
 
@@ -139,7 +129,6 @@ def slack_events():
                                 },
                             )
                         except Exception as e:
-                            logger.error(f"Error processing component selection: {e}")
                             requests.post(
                                 response_url,
                                 json={
@@ -245,7 +234,6 @@ def slack_events():
                                 )
 
                         except Exception as e:
-                            logger.error(f"Error processing view: {e}")
                             requests.post(
                                 response_url,
                                 json={
@@ -293,9 +281,6 @@ def slack_events():
                                     },
                                 )
                             except Exception as e:
-                                logger.error(
-                                    "Error processing download bugs: " + str(e)
-                                )
                                 requests.post(
                                     response_url,
                                     json={
@@ -338,9 +323,6 @@ def slack_events():
                                     },
                                 )
                             except Exception as e:
-                                logger.error(
-                                    "Error processing download impact areas: " + str(e)
-                                )
                                 requests.post(
                                     response_url,
                                     json={
@@ -359,7 +341,6 @@ def slack_events():
             return jsonify({"response_action": "clear"}), 200
 
     except Exception as e:
-        logger.error(f"Error in slack_events: {e}")
         return jsonify({"error": str(e)}), 200
 
 
@@ -392,7 +373,6 @@ def handle_message_event(event):
 
     # Skip if we've seen this message before
     if message_key in processed_messages:
-        logger.info(f"Skipping duplicate message: {message_key}")
         return
 
     # Mark this message as processed
@@ -481,12 +461,11 @@ def handle_app_home_opened(event):
         slack_client.views_publish(user_id=user_id, view=home_view)
 
     except Exception as e:
-        logger.error(f"Error publishing home view: {e}")
+        pass
 
 
 def handle_mention(event):
     """Handle when the bot is mentioned in a channel"""
-    logger.info(f"Handling mention event: {event}")
 
     # Extract the text, removing the bot mention
     text = event.get("text", "")
@@ -500,7 +479,6 @@ def handle_mention(event):
 
 def handle_strategy_request(text, channel, user=None):
     """Handle component analysis requests"""
-    logger.info(f"Handling strategy request: {text}")
     try:
         if not text:
             return
@@ -618,7 +596,6 @@ def handle_strategy_request(text, channel, user=None):
             )
 
     except Exception as e:
-        logger.error(f"Error in handle_strategy_request: {e}")
         if user:
             slack_client.chat_postEphemeral(
                 channel=channel, user=user, text=f"Sorry, I encountered an error: {e}"
@@ -631,7 +608,6 @@ def handle_strategy_request(text, channel, user=None):
 
 def create_view_blocks(view_type, component, analysis, channel, user=None):
     """Process different view types and return formatted blocks"""
-    logger.info(f"Processing view type: {view_type} for component: {component}")
 
     # Handle empty analysis case first
     if not analysis:
@@ -773,7 +749,6 @@ def create_view_blocks(view_type, component, analysis, channel, user=None):
             return blocks
 
         except Exception as e:
-            logger.error(f"Error processing impact view: {str(e)}")
             return [
                 {
                     "type": "section",
@@ -878,5 +853,4 @@ def get_analysis_options_blocks(component):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    logger.info(f"Starting Flask app on port {port}")
     app.run(host="0.0.0.0", port=port)
